@@ -446,15 +446,54 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
   );
 }
 
+// ─── Day config — maps WEEK types to home screen content ─────────────────────
+const DAY_CONFIG = {
+  strength: {
+    headline: ["Strength", "Day A"],
+    sub: "Squat · Bench · Hinge & Hip thrust",
+    cta: "Begin session",
+    canBegin: true,
+  },
+  zone2: {
+    headline: ["Zone 2", "Cardio"],
+    sub: "60 min at conversational pace. Any modality.",
+    tips: ["Keep heart rate at 60–70% max","Nasal breathing if possible","Walk, cycle, row, ski erg — your call"],
+    canBegin: false,
+  },
+  cardio: {
+    headline: ["Moderate", "Cardio"],
+    sub: "35 min at ~75% effort. Elevated but controlled.",
+    tips: ["Target 75–80% max heart rate","Assault bike, rower, or run","Steady state — not a sprint"],
+    canBegin: false,
+  },
+  hiit: {
+    headline: ["HIIT"],
+    sub: "8–10 rounds of 20s all-out / 10s rest.",
+    tips: ["Full effort on every sprint interval","Assault bike or ski erg preferred","Stop if form breaks down"],
+    canBegin: false,
+  },
+  rest: {
+    headline: ["Rest", "Day"],
+    sub: "Recover. You've earned it.",
+    tips: ["Mobility or light yoga if you want to move","Focus on sleep and nutrition","Come back stronger tomorrow"],
+    canBegin: false,
+  },
+};
+
 // ─── Home ──────────────────────────────────────────────────────────────────────
 function HomeScreen({streak,profileName,onBegin,onProfile}){
-  const {strength:s}=T;
-  const today=new Date().toISOString().slice(0,10);
-  const dow=new Date().getDay(); // 0=Sun
-  const weekMap=[6,0,1,2,3,4,5]; // Mon=0 ... Sun=6 → WEEK index
+  const dow     = new Date().getDay(); // 0=Sun
+  const weekMap = [6,0,1,2,3,4,5];    // JS day → WEEK index
+  const todayIdx= weekMap[dow];
+  const todayDay= WEEK[todayIdx];
+  const cfg     = DAY_CONFIG[todayDay.type] || DAY_CONFIG.rest;
+  const accent  = T[todayDay.type]||T.rest;
+
   return (
     <div style={{minHeight:"100vh",paddingBottom:48,position:"relative",overflow:"hidden"}}>
-      <div style={{position:"absolute",top:-180,left:"50%",transform:"translateX(-50%)",width:600,height:500,background:`radial-gradient(ellipse,${s.glow} 0%,transparent 65%)`,pointerEvents:"none"}}/>
+      <div style={{position:"absolute",top:-180,left:"50%",transform:"translateX(-50%)",width:600,height:500,background:`radial-gradient(ellipse,${accent.glow} 0%,transparent 65%)`,pointerEvents:"none"}}/>
+
+      {/* Header */}
       <Fade d={0}>
         <div style={{padding:"52px 24px 0",display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
           <div>
@@ -473,20 +512,26 @@ function HomeScreen({streak,profileName,onBegin,onProfile}){
           </div>
         </div>
       </Fade>
+
+      {/* Today headline — driven by actual day */}
       <Fade d={60}>
         <div style={{padding:"32px 24px 0"}}>
           <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:10}}>Today</div>
           <div style={{fontFamily:T.serif,fontSize:42,fontWeight:300,lineHeight:1.1}}>
-            Strength<br/><span style={{color:s.main,fontStyle:"italic"}}>Day A</span>
+            {cfg.headline[0]}<br/>
+            {cfg.headline[1]&&<span style={{color:accent.main,fontStyle:"italic"}}>{cfg.headline[1]}</span>}
           </div>
-          <div style={{fontSize:14,color:T.text2,marginTop:10,lineHeight:1.5}}>Squat · Bench · Hinge &amp; Hip thrust</div>
+          <div style={{fontSize:14,color:T.text2,marginTop:10,lineHeight:1.5}}
+            dangerouslySetInnerHTML={{__html:cfg.sub.replace("&","&amp;")}}/>
         </div>
       </Fade>
+
+      {/* Week strip */}
       <Fade d={120}>
         <div style={{padding:"28px 24px 0",display:"flex",gap:8}}>
           {WEEK.map((d,i)=>{
             const a=T[d.type];
-            const isToday=i===weekMap[dow];
+            const isToday=i===todayIdx;
             return (
               <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
                 <div style={{width:34,height:34,borderRadius:"50%",background:isToday?a.main:T.bg2,border:`1px solid ${isToday?a.main:T.bg3}`,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:isToday?`0 0 20px ${a.glow}`:"none"}}>
@@ -498,41 +543,66 @@ function HomeScreen({streak,profileName,onBegin,onProfile}){
           })}
         </div>
       </Fade>
-      <Fade d={180}>
-        <Card style={{margin:"24px 24px 0",padding:0,overflow:"hidden"}}>
-          <div style={{height:2,background:`linear-gradient(90deg,${T.coral},${T.coral}00)`}}/>
-          <div style={{padding:"20px 22px 24px"}}>
-            <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:16}}>Session overview</div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",paddingBottom:18,marginBottom:18,borderBottom:`1px solid ${T.bg3}`}}>
-              {[["5","Blocks"],["~65 min","Duration"],["2","Supersets"]].map(([v,l])=>(
-                <div key={l}><div style={{fontFamily:T.serif,fontSize:24,fontWeight:400,lineHeight:1}}>{v}</div>
-                <div style={{fontSize:11,color:T.text3,marginTop:4}}>{l}</div></div>
-              ))}
-            </div>
-            {[
-              {name:"Barbell Back Squat",         detail:"3×5",  tag:"Main"},
-              {name:"Barbell Bench Press",         detail:"3×5",  tag:"Main"},
-              {name:"Reverse Lunge ↔ RDL",        detail:"3×8",  tag:"Superset"},
-              {name:"Hip Thrust ↔ Landmine Press", detail:"3×10", tag:"Superset"},
-              {name:"Leg Raise ↔ Dead Bug",        detail:"2×10", tag:"Finisher"},
-            ].map((ex,i,arr)=>(
-              <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:i<arr.length-1?`1px solid ${T.bg3}`:"none"}}>
-                <div style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0}}>
-                  <div style={{width:6,height:6,borderRadius:"50%",background:ex.tag==="Main"?T.coral:ex.tag==="Superset"?T.sage:T.gold,flexShrink:0}}/>
-                  <span style={{fontSize:13,color:T.text1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ex.name}</span>
+
+      {/* Strength day — full session card + begin button */}
+      {cfg.canBegin&&(
+        <>
+          <Fade d={180}>
+            <Card style={{margin:"24px 24px 0",padding:0,overflow:"hidden"}}>
+              <div style={{height:2,background:`linear-gradient(90deg,${accent.main},${accent.main}00)`}}/>
+              <div style={{padding:"20px 22px 24px"}}>
+                <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:16}}>Session overview</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",paddingBottom:18,marginBottom:18,borderBottom:`1px solid ${T.bg3}`}}>
+                  {[["5","Blocks"],["~65 min","Duration"],["2","Supersets"]].map(([v,l])=>(
+                    <div key={l}>
+                      <div style={{fontFamily:T.serif,fontSize:24,fontWeight:400,lineHeight:1}}>{v}</div>
+                      <div style={{fontSize:11,color:T.text3,marginTop:4}}>{l}</div>
+                    </div>
+                  ))}
                 </div>
-                <span style={{fontFamily:T.serif,fontSize:13,color:T.text3,fontStyle:"italic",flexShrink:0,marginLeft:12}}>{ex.detail}</span>
+                {[
+                  {name:"Barbell Back Squat",         detail:"3×5",  tag:"Main"},
+                  {name:"Barbell Bench Press",         detail:"3×5",  tag:"Main"},
+                  {name:"Reverse Lunge ↔ RDL",        detail:"3×8",  tag:"Superset"},
+                  {name:"Hip Thrust ↔ Landmine Press", detail:"3×10", tag:"Superset"},
+                  {name:"Leg Raise ↔ Dead Bug",        detail:"2×10", tag:"Finisher"},
+                ].map((ex,i,arr)=>(
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:i<arr.length-1?`1px solid ${T.bg3}`:"none"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0}}>
+                      <div style={{width:6,height:6,borderRadius:"50%",background:ex.tag==="Main"?T.coral:ex.tag==="Superset"?T.sage:T.gold,flexShrink:0}}/>
+                      <span style={{fontSize:13,color:T.text1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ex.name}</span>
+                    </div>
+                    <span style={{fontFamily:T.serif,fontSize:13,color:T.text3,fontStyle:"italic",flexShrink:0,marginLeft:12}}>{ex.detail}</span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </Fade>
+          <Fade d={240}>
+            <button onClick={onBegin} style={{margin:"16px 24px 0",width:"calc(100% - 48px)",padding:"18px 24px",background:accent.main,border:"none",borderRadius:T.r.lg,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:`0 12px 40px ${accent.glow}`}}>
+              <span style={{fontFamily:T.serif,fontSize:20,fontWeight:400,color:T.bg0}}>Begin session</span>
+              <span style={{fontSize:18,color:T.bg0}}>→</span>
+            </button>
+          </Fade>
+        </>
+      )}
+
+      {/* Non-strength day — tips card, no begin button */}
+      {!cfg.canBegin&&cfg.tips&&(
+        <Fade d={180}>
+          <Card style={{margin:"24px 24px 0",padding:"20px 22px 24px"}}>
+            <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:16}}>
+              {todayDay.type==="rest"?"Recovery notes":"Session notes"}
+            </div>
+            {cfg.tips.map((tip,i)=>(
+              <div key={i} style={{display:"flex",alignItems:"flex-start",gap:12,padding:"8px 0",borderBottom:i<cfg.tips.length-1?`1px solid ${T.bg3}`:"none"}}>
+                <div style={{width:6,height:6,borderRadius:"50%",background:accent.main,flexShrink:0,marginTop:5}}/>
+                <span style={{fontSize:13,color:T.text2,lineHeight:1.5}}>{tip}</span>
               </div>
             ))}
-          </div>
-        </Card>
-      </Fade>
-      <Fade d={240}>
-        <button onClick={onBegin} style={{margin:"16px 24px 0",width:"calc(100% - 48px)",padding:"18px 24px",background:T.coral,border:"none",borderRadius:T.r.lg,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:`0 12px 40px ${T.strength.glow}`}}>
-          <span style={{fontFamily:T.serif,fontSize:20,fontWeight:400,color:T.bg0}}>Begin session</span>
-          <span style={{fontSize:18,color:T.bg0}}>→</span>
-        </button>
-      </Fade>
+          </Card>
+        </Fade>
+      )}
     </div>
   );
 }
