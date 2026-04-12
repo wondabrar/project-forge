@@ -12,7 +12,7 @@ const T = {
   hiit:    {main:"#C9A0B8",dim:"rgba(201,160,184,0.10)",glow:"rgba(201,160,184,0.16)"},
   cardio:  {main:"#A5B8D0",dim:"rgba(165,184,208,0.09)",glow:"rgba(165,184,208,0.12)"},
   rest:    {main:"#6B6560",dim:"rgba(107,101,96,0.08)", glow:"rgba(107,101,96,0.10)"},
-  serif:"'Fraunces', serif", sans:"'DM Sans', sans-serif",
+  serif:"var(--font-fraunces), serif", sans:"var(--font-dm-sans), sans-serif",
   r:{sm:8,md:14,lg:20,xl:28,pill:999},
   ease:"cubic-bezier(0.22, 1, 0.36, 1)",
 };
@@ -197,15 +197,6 @@ export default function ForgeApp(){
   const [restActive,setRestActive]=useState(false);
   const [restRemain,setRestRemain]=useState(180);
   const [restTrigger,setRestTrigger]=useState(null);
-
-  // Fonts
-  useEffect(()=>{
-    const l=document.createElement("link");
-    l.rel="stylesheet";
-    l.href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;1,9..144,300;1,9..144,400&family=DM+Sans:wght@300;400;500;600&display=swap";
-    document.head.appendChild(l);
-    return()=>{try{document.head.removeChild(l);}catch(_){}};
-  },[]);
 
   // Seed on profile change + pull from blob
   useEffect(()=>{
