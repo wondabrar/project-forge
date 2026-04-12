@@ -363,7 +363,21 @@ export default function ForgeApp(){
 // ─── Profile Screen ────────────────────────────────────────────────────────────
 function ProfileScreen({existing,current,onActivate,onCancel}){
   const [name,setName]=useState("");
+  const [confirmWipe,setConfirmWipe]=useState(null); // profile name to wipe
   const {strength:s}=T;
+
+  const wipeProfile=(n)=>{
+    // Clear all localStorage keys for this profile
+    ["weights","reps","streak"].forEach(k=>localStorage.removeItem(`forge:${n}:${k}`));
+    // Remove from profiles list
+    const updated=P.list().filter(p=>p!==n);
+    LS.set("forge:profiles",updated);
+    if(P.getActive()===n){ LS.set("forge:active",null); }
+    setConfirmWipe(null);
+    // Force reload to re-seed
+    window.location.reload();
+  };
+
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased",padding:"72px 24px 48px",position:"relative",overflow:"hidden"}}>
       <div style={{position:"absolute",top:-160,left:"50%",transform:"translateX(-50%)",width:500,height:440,background:`radial-gradient(ellipse,${s.glow} 0%,transparent 65%)`,pointerEvents:"none"}}/>
@@ -382,9 +396,12 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
             <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:12}}>On this device</div>
             <div style={{display:"flex",flexDirection:"column",gap:8}}>
               {existing.map(n=>(
-                <div key={n} onClick={()=>onActivate(n)} style={{padding:"16px 20px",borderRadius:T.r.lg,cursor:"pointer",background:n===current?`${T.coral}12`:T.bg2,border:`1px solid ${n===current?T.coral+"44":T.bg3}`,display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 180ms ${T.ease}`}}>
-                  <span style={{fontFamily:T.serif,fontSize:20,fontWeight:300,color:T.text1}}>{n}</span>
-                  {n===current&&<span style={{fontSize:11,color:T.coral,fontWeight:500,letterSpacing:"0.08em",textTransform:"uppercase"}}>Active</span>}
+                <div key={n} style={{padding:"16px 20px",borderRadius:T.r.lg,background:n===current?`${T.coral}12`:T.bg2,border:`1px solid ${n===current?T.coral+"44":T.bg3}`,display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 180ms ${T.ease}`}}>
+                  <span onClick={()=>onActivate(n)} style={{fontFamily:T.serif,fontSize:20,fontWeight:300,color:T.text1,cursor:"pointer",flex:1}}>{n}</span>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    {n===current&&<span style={{fontSize:11,color:T.coral,fontWeight:500,letterSpacing:"0.08em",textTransform:"uppercase"}}>Active</span>}
+                    <button onClick={()=>setConfirmWipe(n)} style={{background:"none",border:"none",padding:"2px 6px",cursor:"pointer",fontSize:11,color:T.text4,fontFamily:T.sans}} title="Wipe progress">✕</button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -403,6 +420,28 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
             style={{padding:"14px 20px",background:name.trim()?T.coral:T.bg3,border:"none",borderRadius:T.r.md,cursor:name.trim()?"pointer":"default",fontFamily:T.serif,fontSize:18,fontWeight:400,color:name.trim()?T.bg0:T.text4,transition:`all 200ms ${T.ease}`}}>→</button>
         </div>
       </Fade>
+
+      {/* Wipe confirmation modal */}
+      {confirmWipe&&(
+        <div onClick={()=>setConfirmWipe(null)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px 40px",width:"100%",maxWidth:430,borderTop:`1px solid ${T.rose}33`,animation:`slideUp 240ms ${T.ease}`}}>
+            <div style={{fontFamily:T.serif,fontSize:24,fontWeight:300,lineHeight:1.2,marginBottom:8}}>
+              Wipe <span style={{color:T.rose,fontStyle:"italic"}}>{confirmWipe}</span>?
+            </div>
+            <p style={{fontSize:13,color:T.text2,marginBottom:28,lineHeight:1.6}}>
+              This will permanently delete all saved weights, reps, and the streak for this profile. It cannot be undone.
+            </p>
+            <div style={{display:"flex",gap:10}}>
+              <button onClick={()=>setConfirmWipe(null)} style={{flex:1,padding:"16px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text2}}>
+                Cancel
+              </button>
+              <button onClick={()=>wipeProfile(confirmWipe)} style={{flex:1,padding:"16px",background:`${T.rose}22`,border:`1px solid ${T.rose}55`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:17,fontWeight:400,color:T.rose}}>
+                Wipe progress
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -567,6 +606,7 @@ function RpeCard({onPick,label="How was that set?"}){
 // ─── Session ───────────────────────────────────────────────────────────────────
 function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,showVid,setShowVid,getW,getR,editTarget,setEditTarget,workingWeights,setWW,workingReps,setWR,awaitRpe,ssRoundDone,restActive,restRemain,setRestActive,setRestRemain,onCommit,onLog,onQuit}){
   const {strength:s}=T;
+  const [swapEx,setSwapEx]=useState(null);
   const partnerEx=isSS?(phase==="A"?block.exB:block.exA):null;
   const vidEx    =isSS?(phase==="A"?block.exA:block.exB):block.ex;
   const progress =((blockIdx+(setNum-1)/block.sets)/totalBlocks)*100;
@@ -595,23 +635,36 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
         <Tag color={block.type==="main"?T.coral:block.type==="superset"?T.sage:T.gold}>{typeLabel}</Tag>
         {isSS&&<Tag color={T.steel}>Exercise {phase}</Tag>}
       </div>
-      <div style={{padding:"14px 20px 0",cursor:"pointer"}} onClick={()=>setShowVid(true)}>
-        <div style={{fontFamily:T.serif,fontSize:nameFz,fontWeight:300,lineHeight:1.1}}>{activeEx?.name}</div>
-        <div style={{display:"flex",alignItems:"center",gap:10,marginTop:8}}>
-          <span style={{fontSize:11,color:T.coral,fontWeight:500}}>▶ Watch demo</span>
-          <span style={{fontSize:11,color:T.text3}}>{activeEx?.muscle}</span>
+      <div style={{padding:"14px 20px 0"}}>
+        {/* Exercise name — tapping name opens video */}
+        <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+          <div onClick={()=>setShowVid(true)} style={{cursor:"pointer",flex:1,userSelect:"none"}}>
+            <div style={{fontFamily:T.serif,fontSize:nameFz,fontWeight:300,lineHeight:1.1}}>{activeEx?.name}</div>
+            <div style={{display:"flex",alignItems:"center",gap:10,marginTop:8}}>
+              <span style={{fontSize:11,color:T.coral,fontWeight:500}}>▶ Watch demo</span>
+              <span style={{fontSize:11,color:T.text3}}>{activeEx?.muscle}</span>
+            </div>
+          </div>
+          {/* Swap button — clearly labelled, separate from video tap */}
+          <button
+            onClick={()=>setSwapEx({block,phase})}
+            style={{marginTop:4,flexShrink:0,background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.md,padding:"8px 12px",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:`all 180ms ${T.ease}`}}
+          >
+            <span style={{fontSize:14}}>⇄</span>
+            <span style={{fontSize:9,fontWeight:500,color:T.text3,letterSpacing:"0.08em",textTransform:"uppercase"}}>Swap</span>
+          </button>
         </div>
       </div>
       <div style={{padding:"22px 20px 0"}}>
         <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:10}}>Set {setNum} of {block.sets}</div>
         {currentW!==null&&(
-          <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4,cursor:"pointer"}} onClick={()=>setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx)})}>
+          <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4,cursor:"pointer",userSelect:"none"}} onClick={()=>setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx)})}>
             <span style={{fontFamily:T.serif,fontSize:80,fontWeight:300,color:T.text1,lineHeight:1,letterSpacing:"-0.02em"}}>{currentW}</span>
             <span style={{fontFamily:T.serif,fontSize:22,fontWeight:300,color:T.text3,marginBottom:8}}>kg</span>
             <span style={{fontSize:11,color:T.text3,marginBottom:10,marginLeft:4}}>↕</span>
           </div>
         )}
-        <div style={{display:"flex",alignItems:"baseline",gap:6,cursor:"pointer"}} onClick={()=>setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx)})}>
+        <div style={{display:"flex",alignItems:"baseline",gap:6,cursor:"pointer",userSelect:"none"}} onClick={()=>setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx)})}>
           <span style={{fontFamily:T.serif,fontSize:48,fontWeight:400,color:T.coral,lineHeight:1,fontStyle:"italic"}}>{getR(activeEx)}</span>
           <span style={{fontSize:14,color:T.text3,marginBottom:4}}>reps</span>
           <span style={{fontSize:11,color:T.text3,marginBottom:6,marginLeft:4}}>↕</span>
@@ -670,6 +723,7 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
         </Card>
       )}
       {editTarget&&<DrumEditOverlay target={editTarget} workingWeights={workingWeights} setWW={setWW} workingReps={workingReps} setWR={setWR} block={block} onClose={()=>setEditTarget(null)}/>}
+      {swapEx&&<SwapOverlay activeEx={activeEx} onClose={()=>setSwapEx(null)}/>}
       {showVid&&vidEx&&(
         <div onClick={()=>setShowVid(false)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
           <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:24,width:"100%",maxWidth:430,borderTop:`1px solid ${T.coral}33`,animation:`slideUp 280ms ${T.ease}`}}>
@@ -683,6 +737,80 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Swap Overlay ──────────────────────────────────────────────────────────────
+// Near-match alternatives by muscle group. Travel mode filters to bodyweight/dumbbell.
+const SWAP_DB = {
+  "Barbell Back Squat":   [{name:"Goblet Squat",eq:"Dumbbell"},{name:"Bulgarian Split Squat",eq:"Dumbbell"},{name:"Leg Press",eq:"Machine"},{name:"Hack Squat",eq:"Machine"}],
+  "Barbell Bench Press":  [{name:"Dumbbell Bench Press",eq:"Dumbbell"},{name:"Push-Up",eq:"Bodyweight"},{name:"Dumbbell Floor Press",eq:"Dumbbell"}],
+  "Barbell Reverse Lunge":[{name:"Dumbbell Reverse Lunge",eq:"Dumbbell"},{name:"Step-Up",eq:"Bodyweight"},{name:"Split Squat",eq:"Bodyweight"}],
+  "Romanian Deadlift":    [{name:"Dumbbell RDL",eq:"Dumbbell"},{name:"Good Morning",eq:"Bodyweight"},{name:"Nordic Curl",eq:"Bodyweight"}],
+  "Barbell Hip Thrust":   [{name:"Glute Bridge",eq:"Bodyweight"},{name:"Single-Leg Hip Thrust",eq:"Bodyweight"},{name:"Cable Pull-Through",eq:"Cable"}],
+  "Landmine Press":       [{name:"Dumbbell Shoulder Press",eq:"Dumbbell"},{name:"Arnold Press",eq:"Dumbbell"},{name:"Pike Push-Up",eq:"Bodyweight"}],
+  "Hanging Leg Raise":    [{name:"Lying Leg Raise",eq:"Bodyweight"},{name:"Ab Wheel",eq:"Equipment"},{name:"Reverse Crunch",eq:"Bodyweight"}],
+  "Dead Bug":             [{name:"Hollow Body Hold",eq:"Bodyweight"},{name:"Plank",eq:"Bodyweight"}],
+  "Hex Bar Deadlift":     [{name:"Dumbbell Deadlift",eq:"Dumbbell"},{name:"Romanian Deadlift",eq:"Barbell"},{name:"Sumo Deadlift",eq:"Barbell"}],
+  "Barbell Overhead Press":[{name:"Dumbbell Shoulder Press",eq:"Dumbbell"},{name:"Arnold Press",eq:"Dumbbell"},{name:"Pike Push-Up",eq:"Bodyweight"}],
+  "Leg Press":            [{name:"Goblet Squat",eq:"Dumbbell"},{name:"Bulgarian Split Squat",eq:"Dumbbell"},{name:"Wall Sit",eq:"Bodyweight"}],
+  "Pull-Up":              [{name:"Lat Pulldown",eq:"Cable"},{name:"Resistance Band Pull-Down",eq:"Band"},{name:"TRX Row",eq:"Bodyweight"}],
+  "Machine Hamstring Curl":[{name:"Nordic Curl",eq:"Bodyweight"},{name:"Dumbbell Leg Curl",eq:"Dumbbell"},{name:"Swiss Ball Curl",eq:"Equipment"}],
+  "Barbell Hip Thrust":   [{name:"Glute Bridge",eq:"Bodyweight"},{name:"Cable Pull-Through",eq:"Cable"},{name:"Donkey Kick",eq:"Bodyweight"}],
+  "Power Clean":          [{name:"Dumbbell Hang Clean",eq:"Dumbbell"},{name:"Kettlebell Swing",eq:"Kettlebell"},{name:"Jump Squat",eq:"Bodyweight"}],
+  "DB Walking Lunges":    [{name:"Reverse Lunge",eq:"Bodyweight"},{name:"Step-Up",eq:"Bodyweight"},{name:"Split Squat",eq:"Bodyweight"}],
+  "Cable Pull-Through":   [{name:"Good Morning",eq:"Bodyweight"},{name:"Glute Bridge",eq:"Bodyweight"},{name:"Resistance Band Pull-Through",eq:"Band"}],
+  "Incline DB Bench":     [{name:"Incline Push-Up",eq:"Bodyweight"},{name:"Dumbbell Chest Fly",eq:"Dumbbell"},{name:"Cable Chest Fly",eq:"Cable"}],
+  "Cable Row":            [{name:"Dumbbell Bent-Over Row",eq:"Dumbbell"},{name:"TRX Row",eq:"Bodyweight"},{name:"Resistance Band Row",eq:"Band"}],
+  "DB Hammer Curl":       [{name:"Resistance Band Curl",eq:"Band"},{name:"Chin-Up",eq:"Bodyweight"},{name:"Supinated Dumbbell Curl",eq:"Dumbbell"}],
+  "Tricep Dips":          [{name:"Close-Grip Push-Up",eq:"Bodyweight"},{name:"Overhead Tricep Extension",eq:"Dumbbell"},{name:"Resistance Band Pushdown",eq:"Band"}],
+  "Face Pull":            [{name:"Resistance Band Face Pull",eq:"Band"},{name:"Rear Delt Fly",eq:"Dumbbell"},{name:"Y-T-W Raise",eq:"Bodyweight"}],
+  "Lateral Raise":        [{name:"Resistance Band Lateral Raise",eq:"Band"},{name:"Cable Lateral Raise",eq:"Cable"}],
+};
+
+const EQ_COLOUR = {
+  Bodyweight:"#8BB09A", Dumbbell:"#A5B8D0", Cable:"#C4A882",
+  Machine:"#C9A0B8", Barbell:"#E0956A", Band:"#8BB09A",
+  Kettlebell:"#C4A882", Equipment:"#A5B8D0",
+};
+
+function SwapOverlay({activeEx,onClose}){
+  const [travel,setTravel]=useState(false);
+  const options=(SWAP_DB[activeEx?.name]||[]).filter(o=>!travel||["Bodyweight","Dumbbell","Band"].includes(o.eq));
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:300,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"24px 24px 36px",width:"100%",maxWidth:430,borderTop:`1px solid ${T.bg3}`,animation:`slideUp 260ms ${T.ease}`}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+          <div>
+            <div style={{fontSize:10,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:4}}>Swap exercise</div>
+            <div style={{fontFamily:T.serif,fontSize:20,fontWeight:300,color:T.text2,fontStyle:"italic"}}>{activeEx?.name}</div>
+          </div>
+          <button onClick={onClose} style={{background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,padding:"6px 10px",cursor:"pointer",color:T.text2,fontSize:13}}>✕</button>
+        </div>
+        {/* Travel mode toggle */}
+        <div style={{display:"flex",alignItems:"center",gap:10,margin:"14px 0",padding:"10px 14px",background:T.bg3,borderRadius:T.r.md,cursor:"pointer"}} onClick={()=>setTravel(p=>!p)}>
+          <div style={{width:32,height:18,borderRadius:9,background:travel?T.coral:T.bg4,position:"relative",transition:`background 200ms ${T.ease}`,flexShrink:0}}>
+            <div style={{position:"absolute",top:2,left:travel?14:2,width:14,height:14,borderRadius:"50%",background:"#fff",transition:`left 200ms ${T.ease}`}}/>
+          </div>
+          <div>
+            <div style={{fontSize:13,color:T.text1,fontWeight:500}}>Travel mode</div>
+            <div style={{fontSize:11,color:T.text3,marginTop:1}}>Bodyweight, dumbbell & band only</div>
+          </div>
+        </div>
+        {options.length===0&&(
+          <div style={{padding:"20px 0",fontSize:13,color:T.text3,fontStyle:"italic",fontFamily:T.serif,textAlign:"center"}}>No alternatives for current filter</div>
+        )}
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {options.map((o,i)=>(
+            <div key={i} onClick={onClose} style={{padding:"14px 16px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.md,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 180ms ${T.ease}`}}>
+              <span style={{fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text1}}>{o.name}</span>
+              <span style={{fontSize:10,fontWeight:500,color:EQ_COLOUR[o.eq]||T.text3,background:`${EQ_COLOUR[o.eq]||T.bg4}18`,border:`1px solid ${EQ_COLOUR[o.eq]||T.bg4}44`,borderRadius:T.r.pill,padding:"3px 10px",letterSpacing:"0.06em",textTransform:"uppercase",flexShrink:0}}>{o.eq}</span>
+            </div>
+          ))}
+        </div>
+        <div style={{marginTop:16,fontSize:11,color:T.text4,fontStyle:"italic",fontFamily:T.serif,textAlign:"center"}}>Tap an exercise to swap for this set</div>
+      </div>
     </div>
   );
 }
