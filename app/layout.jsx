@@ -1,4 +1,23 @@
 import "./globals.css";
+import { Fraunces, DM_Sans } from "next/font/google";
+
+const fraunces = Fraunces({
+  subsets: ["latin"],
+  axes: ["opsz"],
+  weight: ["300", "400"],
+  style: ["normal", "italic"],
+  display: "swap",
+  variable: "--font-fraunces",
+  preload: true,
+});
+
+const dmSans = DM_Sans({
+  subsets: ["latin"],
+  weight: ["300", "400", "500", "600"],
+  display: "swap",
+  variable: "--font-dm-sans",
+  preload: true,
+});
 
 export const metadata = {
   title: "Forge",
@@ -24,7 +43,7 @@ export const viewport = {
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${fraunces.variable} ${dmSans.variable}`}>
       <head>
         <meta name="apple-mobile-web-app-capable" content="yes" />
         <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
