@@ -754,10 +754,13 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
       </div>
       <div style={{padding:"14px 20px 0"}}>
         <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
-          <div onClick={()=>setShowVid(true)} style={{cursor:"pointer",flex:1,userSelect:"none"}}>
+          <div onClick={activeEx?.vid ? ()=>setShowVid(true) : undefined}
+            style={{cursor:activeEx?.vid?"pointer":"default",flex:1,userSelect:"none"}}>
             <div style={{fontFamily:T.serif,fontSize:nameFz,fontWeight:300,lineHeight:1.1}}>{activeEx?.name}</div>
             <div style={{display:"flex",alignItems:"center",gap:10,marginTop:8}}>
-              <span style={{fontSize:11,color:T.coral,fontWeight:500}}>▶ Watch demo</span>
+              {activeEx?.vid && (
+                <span style={{fontSize:11,color:T.coral,fontWeight:500}}>▶ Watch demo</span>
+              )}
               <span style={{fontSize:11,color:T.text3}}>{activeEx?.muscle}</span>
             </div>
           </div>
@@ -871,7 +874,7 @@ function SwapOverlay({activeEx,swapKey,onSwap,onClose}){
       muscle: option.muscle,
       reps:   activeEx?.reps   ?? 10,
       weight: activeEx?.weight ?? null,
-      vid:    null, // video IDs for swap alternatives not yet catalogued
+      vid:    option.vid ?? null,
     });
     onClose();
   };
