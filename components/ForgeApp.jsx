@@ -1,6 +1,16 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import {
+  WEEK, STRENGTH_DAY_SESSIONS, SESSIONS,
+  EXERCISE_POOLS, rotateAccessories,
+  DAY_CONFIG, DAY_NAMES, SWAP_DB, EQ_COLOUR,
+} from "@/lib/programme";
+import {
+  LS, P, PB, bumpStreak,
+  blobPull, blobPush,
+  roundPlate, applyRpe, weeksSince,
+} from "@/lib/storage";
 
 // ─── Tokens ────────────────────────────────────────────────────────────────────
 const T = {
@@ -15,99 +25,6 @@ const T = {
   serif:"var(--font-fraunces), serif", sans:"var(--font-dm-sans), sans-serif",
   r:{sm:8,md:14,lg:20,xl:28,pill:999},
   ease:"cubic-bezier(0.22, 1, 0.36, 1)",
-};
-
-// ─── localStorage (SSR-safe) ──────────────────────────────────────────────────
-const LS = {
-  get:(key,fb=null)=>{
-    if(typeof window==="undefined") return fb;
-    try{const v=localStorage.getItem(key);return v!==null?JSON.parse(v):fb;}
-    catch{return fb;}
-  },
-  set:(key,val)=>{
-    if(typeof window==="undefined") return;
-    try{localStorage.setItem(key,JSON.stringify(val));}catch{}
-  },
-};
-
-const P = {
-  list:        ()        => LS.get("forge:profiles",[]),
-  add:         (n)       => { const p=P.list(); if(!p.includes(n)) LS.set("forge:profiles",[...p,n]); },
-  getActive:   ()        => LS.get("forge:active",null),
-  setActive:   (n)       => LS.set("forge:active",n),
-  getWeights:  (n)       => LS.get(`forge:${n}:weights`,{}),
-  saveWeights: (n,w)     => LS.set(`forge:${n}:weights`,w),
-  getReps:     (n)       => LS.get(`forge:${n}:reps`,{}),
-  saveReps:    (n,r)     => LS.set(`forge:${n}:reps`,r),
-  getStreak:   (n)       => LS.get(`forge:${n}:streak`,{count:0,lastDate:null}),
-  saveStreak:  (n,s)     => LS.set(`forge:${n}:streak`,s),
-};
-
-function bumpStreak(name){
-  const today=new Date().toISOString().slice(0,10);
-  const yesterday=new Date(Date.now()-86400000).toISOString().slice(0,10);
-  const {count,lastDate}=P.getStreak(name);
-  if(lastDate===today) return count;
-  const next=lastDate===yesterday?count+1:1;
-  P.saveStreak(name,{count:next,lastDate:today});
-  return next;
-}
-
-// ─── Blob sync (fire-and-forget, never blocks UI) ─────────────────────────────
-async function blobPull(profile){
-  try{
-    const res=await fetch(`/api/sync?profile=${encodeURIComponent(profile)}`);
-    if(!res.ok) return null;
-    return await res.json();
-  }catch{return null;}
-}
-async function blobPush(profile,data){
-  try{
-    await fetch("/api/sync",{
-      method:"PUT",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({profile,data}),
-    });
-  }catch{/* silent — localStorage is source of truth */}
-}
-
-// ─── Progression ──────────────────────────────────────────────────────────────
-const roundPlate=(kg)=>Math.round(kg/1.25)*1.25;
-function applyRpe(weight,rpe){
-  if(weight===null||weight===undefined) return weight;
-  if(rpe==="easy")  return roundPlate(weight*1.025);
-  if(rpe==="limit") return roundPlate(weight*0.95);
-  return weight;
-}
-
-// ─── Programme ────────────────────────────────────────────────────────────────
-const WEEK=[
-  {s:"M",label:"Strength",type:"strength",done:false,today:false},
-  {s:"T",label:"Zone 2",  type:"zone2",   done:false,today:false},
-  {s:"W",label:"Strength",type:"strength",done:false,today:false},
-  {s:"T",label:"Cardio",  type:"cardio",  done:false,today:false},
-  {s:"F",label:"Strength",type:"strength",done:false,today:false},
-  {s:"S",label:"HIIT",    type:"hiit",    done:false,today:false},
-  {s:"S",label:"Rest",    type:"rest",    done:false,today:false},
-];
-
-const SESSION={
-  name:"Strength A",type:"strength",
-  blocks:[
-    {id:"a1",type:"main",     label:"Main lift · 1 of 2",sets:3,rest:180,
-     ex: {name:"Barbell Back Squat",   reps:5,     weight:100,muscle:"Quadriceps",    vid:"nEQQle9-0NA"}},
-    {id:"a2",type:"main",     label:"Main lift · 2 of 2",sets:3,rest:180,
-     ex: {name:"Barbell Bench Press",  reps:5,     weight:80, muscle:"Chest",         vid:"4Y2ZdHCOXok"}},
-    {id:"ss1",type:"superset",label:"Superset · 1 of 2", sets:3,rest:90,
-     exA:{name:"Barbell Reverse Lunge",reps:"8/leg",weight:60,muscle:"Quads & Glutes",vid:"AIR5XoiQJaI"},
-     exB:{name:"Romanian Deadlift",    reps:8,     weight:80, muscle:"Hamstrings",    vid:"hCDzSR6bW10"}},
-    {id:"ss2",type:"superset",label:"Superset · 2 of 2", sets:3,rest:90,
-     exA:{name:"Barbell Hip Thrust",   reps:10,    weight:100,muscle:"Glutes",        vid:"xDmFkJxPzeM"},
-     exB:{name:"Landmine Press",       reps:10,    weight:30, muscle:"Upper chest",   vid:"QMrm2WMbj3k"}},
-    {id:"fin",type:"finisher",label:"Finisher",           sets:2,rest:60,
-     exA:{name:"Hanging Leg Raise",    reps:10,    weight:null,muscle:"Core",         vid:"hdng3Nm1x_E"},
-     exB:{name:"Dead Bug",             reps:10,    weight:null,muscle:"Core / Anti-rot",vid:"g_BYB0R-4Ws"}},
-  ],
 };
 
 // ─── Fade hook ─────────────────────────────────────────────────────────────────
@@ -184,6 +101,9 @@ export default function ForgeApp(){
   const [showProfiles,setShowProfiles]=useState(false);
   const [streak,setStreak]=useState(0);
   const [screen,setScreen]=useState("home");
+  const [activeSessionIdx,setActiveSessionIdx]=useState(0);
+  const [sessionSwaps,setSessionSwaps]=useState({});
+  const [programmeBlock,setProgrammeBlock]=useState(()=>PB.get());
   const [blockIdx,setBlockIdx]=useState(0);
   const [setNum,setSetNum]=useState(1);
   const [phase,setPhase]=useState("A");
@@ -219,6 +139,11 @@ export default function ForgeApp(){
       if(remote.streak?.count>P.getStreak(activeProfile).count){
         P.saveStreak(activeProfile,remote.streak);
         setStreak(remote.streak.count);
+      }
+      // Merge rotation state — take whichever device is further ahead
+      if(remote.programmeBlock?.number>PB.get().number){
+        PB.save(remote.programmeBlock);
+        setProgrammeBlock(remote.programmeBlock);
       }
     });
   },[activeProfile]);
@@ -258,14 +183,37 @@ export default function ForgeApp(){
     setShowProfiles(false);
   };
 
-  const block    = SESSION.blocks[blockIdx];
+  const activeSession = SESSIONS[activeSessionIdx];
+  const block    = activeSession.blocks[blockIdx];
   const isSS     = block.type==="superset"||block.type==="finisher";
-  const activeEx = isSS?(phase==="A"?block.exA:block.exB):block.ex;
+  const swapKey  = isSS ? `${block.id}-${phase}` : block.id;
+
+  // Single source of truth for exercise resolution:
+  // manual in-session swap → rotation config → programme default
+  const resolveExFn = useCallback((blockId, ph, defaultEx) => {
+    const key = ph ? `${blockId}-${ph}` : blockId;
+    return sessionSwaps[key] ?? programmeBlock.config[key] ?? defaultEx;
+  }, [sessionSwaps, programmeBlock]);
+
+  // Pre-resolve both sides of the current block so SessionScreen
+  // never needs to touch block.exA/exB directly
+  const resolvedExA = isSS ? resolveExFn(block.id, "A", block.exA) : null;
+  const resolvedExB = isSS ? resolveExFn(block.id, "B", block.exB) : null;
+  const resolvedEx  = !isSS ? resolveExFn(block.id, null, block.ex) : null;
+  const activeEx    = isSS ? (phase==="A" ? resolvedExA : resolvedExB) : resolvedEx;
+
   const getW=useCallback((ex)=>ex?(workingWeights[ex.name]??ex.weight):null,[workingWeights]);
   const getR=useCallback((ex)=>ex?(workingReps[ex.name]??ex.reps):null,[workingReps]);
 
+  const onSwap=useCallback((key, newEx)=>{
+    setSessionSwaps(prev=>({...prev,[key]:newEx}));
+  },[]);
+
   const commitLog=useCallback((rpe)=>{
-    const exes=isSS?[block.exA,block.exB]:[block.ex];
+    // Use resolved exercises so RPE weight adjustments target the correct name
+    const exes = isSS
+      ? [resolveExFn(block.id,"A",block.exA), resolveExFn(block.id,"B",block.exB)]
+      : [resolveExFn(block.id, null, block.ex)];
     const updates={};
     exes.forEach(ex=>{
       if(!ex) return;
@@ -274,13 +222,13 @@ export default function ForgeApp(){
     });
     if(Object.keys(updates).length) setWW(p=>({...p,...updates}));
     if(setNum>=block.sets){
-      if(blockIdx<SESSION.blocks.length-1){setBlockIdx(p=>p+1);setSetNum(1);setPhase("A");}
+      if(blockIdx<activeSession.blocks.length-1){setBlockIdx(p=>p+1);setSetNum(1);setPhase("A");}
       else setScreen("done");
     }else setSetNum(p=>p+1);
     setRestTrigger({id:Date.now(),duration:block.rest});
     setSsRoundDone(false);
     setAwaitRpe(false);
-  },[block,blockIdx,isSS,setNum,workingWeights,setWW]);
+  },[block,blockIdx,isSS,setNum,workingWeights,setWW,activeSession,resolveExFn]);
 
   const handleLog=useCallback(()=>{
     if(isSS){
@@ -288,7 +236,7 @@ export default function ForgeApp(){
       setPhase("A");
       if(block.type==="superset"){setSsRoundDone(true);return;}
       if(setNum>=block.sets){
-        if(blockIdx<SESSION.blocks.length-1){setBlockIdx(p=>p+1);setSetNum(1);setPhase("A");}
+        if(blockIdx<activeSession.blocks.length-1){setBlockIdx(p=>p+1);setSetNum(1);setPhase("A");}
         else setScreen("done");
       }else setSetNum(p=>p+1);
       setRestTrigger({id:Date.now(),duration:block.rest});
@@ -301,6 +249,7 @@ export default function ForgeApp(){
     setBlockIdx(0);setSetNum(1);setPhase("A");setReadiness(null);
     setAwaitRpe(false);setSsRoundDone(false);
     setRestActive(false);setRestRemain(180);setRestTrigger(null);
+    setSessionSwaps({});
     setScreen("home");
   };
 
@@ -312,6 +261,7 @@ export default function ForgeApp(){
         weights:workingWeights,
         reps:workingReps,
         streak:P.getStreak(activeProfile),
+        programmeBlock,
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -324,7 +274,10 @@ export default function ForgeApp(){
   }
 
   const sProps={
-    block,blockIdx,totalBlocks:SESSION.blocks.length,setNum,phase,isSS,activeEx,
+    session:activeSession,
+    block,blockIdx,totalBlocks:activeSession.blocks.length,setNum,phase,isSS,
+    activeEx, resolvedExA, resolvedExB, resolvedEx,
+    swapKey,onSwap,
     showVid,setShowVid,getW,getR,editTarget,setEditTarget,
     workingWeights,setWW,workingReps,setWR,
     awaitRpe,ssRoundDone,
@@ -332,12 +285,34 @@ export default function ForgeApp(){
     onCommit:commitLog,onLog:handleLog,onQuit:reset,
   };
 
+  // Derive today's session index for HomeScreen
+  const dow      = new Date().getDay();
+  const weekMap  = [6,0,1,2,3,4,5];
+  const todayIdx = weekMap[dow];
+  const todaySessionIdx = STRENGTH_DAY_SESSIONS[todayIdx] ?? 0;
+
+  const beginSession = () => {
+    setActiveSessionIdx(todaySessionIdx);
+    setScreen("readiness");
+  };
+
+  const handleRotate = () => {
+    const history = {};
+    Object.entries(programmeBlock.config).forEach(([k,ex])=>{ history[k]=ex.name; });
+    const newConfig = rotateAccessories(history);
+    const next = { number: programmeBlock.number+1, startDate: new Date().toISOString().slice(0,10), config: newConfig, history };
+    setProgrammeBlock(next);
+    PB.save(next);
+  };
+
+  const weeksOnBlock = weeksSince(programmeBlock.startDate);
+
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"      && <HomeScreen      streak={streak} profileName={activeProfile} onBegin={()=>setScreen("readiness")} onProfile={()=>setShowProfiles(true)}/>}
+      {screen==="home"      && <HomeScreen streak={streak} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate}/>}
       {screen==="readiness" && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} onStart={()=>setScreen("session")}/>}
       {screen==="session"   && <SessionScreen   {...sProps}/>}
-      {screen==="done"      && <DoneScreen       profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/>}
+      {screen==="done"      && <DoneScreen       session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/>}
     </div>
   );
 }
@@ -424,44 +399,8 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
   );
 }
 
-// ─── Day config ───────────────────────────────────────────────────────────────
-const DAY_CONFIG = {
-  strength: {
-    headline: ["Strength", "Day A"],
-    sub: "Squat · Bench · Hinge & Hip thrust",
-    cta: "Begin session",
-    canBegin: true,
-  },
-  zone2: {
-    headline: ["Zone 2", "Cardio"],
-    sub: "60 min at conversational pace. Any modality.",
-    tips: ["Keep heart rate at 60–70% max","Nasal breathing if possible","Walk, cycle, row, ski erg — your call"],
-    canBegin: false,
-  },
-  cardio: {
-    headline: ["Moderate", "Cardio"],
-    sub: "35 min at ~75% effort. Elevated but controlled.",
-    tips: ["Target 75–80% max heart rate","Assault bike, rower, or run","Steady state — not a sprint"],
-    canBegin: false,
-  },
-  hiit: {
-    headline: ["HIIT"],
-    sub: "8–10 rounds of 20s all-out / 10s rest.",
-    tips: ["Full effort on every sprint interval","Assault bike or ski erg preferred","Stop if form breaks down"],
-    canBegin: false,
-  },
-  rest: {
-    headline: ["Rest", "Day"],
-    sub: "Recover. You've earned it.",
-    tips: ["Mobility or light yoga if you want to move","Focus on sleep and nutrition","Come back stronger tomorrow"],
-    canBegin: false,
-  },
-};
-
 // ─── Home ──────────────────────────────────────────────────────────────────────
-const DAY_NAMES = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
-
-function HomeScreen({streak,profileName,onBegin,onProfile}){
+function HomeScreen({streak,profileName,onBegin,onProfile,programmeBlock,weeksOnBlock,onRotate}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -472,6 +411,14 @@ function HomeScreen({streak,profileName,onBegin,onProfile}){
   const cfg            = DAY_CONFIG[viewDay.type] || DAY_CONFIG.rest;
   const accent         = T[viewDay.type] || T.rest;
   const isViewingToday = viewIdx === todayIdx;
+
+  // Resolve which session to preview for the viewed day (null for non-strength days)
+  const viewSessionIdx = STRENGTH_DAY_SESSIONS[viewIdx];
+  const viewSession    = viewSessionIdx !== undefined ? SESSIONS[viewSessionIdx] : null;
+
+  // Dynamic headline/sub for strength days
+  const headline2 = viewSession ? viewSession.subtitle : cfg.headline[1];
+  const subText   = viewSession ? viewSession.subtitle : cfg.sub;
 
   // Negative diff = earlier this week, positive = later this week
   const diffDays = viewIdx - todayIdx;
@@ -578,54 +525,65 @@ function HomeScreen({streak,profileName,onBegin,onProfile}){
           </div>
           <div style={{fontFamily:T.serif,fontSize:42,fontWeight:300,lineHeight:1.1}}>
             {cfg.headline[0]}<br/>
-            {cfg.headline[1] && (
+            {headline2 && (
               <span style={{color:accent.main,fontStyle:"italic",transition:`color 300ms ${T.ease}`}}>
-                {cfg.headline[1]}
+                {headline2}
               </span>
             )}
           </div>
-          <div style={{fontSize:14,color:T.text2,marginTop:10,lineHeight:1.5}}
-            dangerouslySetInnerHTML={{__html:cfg.sub.replace("&","&amp;")}}/>
+          <div style={{fontSize:14,color:T.text2,marginTop:10,lineHeight:1.5}}>
+            {viewSession ? viewSession.subtitle : cfg.sub}
+          </div>
         </div>
       </Fade>
 
       {/* Strength day — session card + CTA */}
-      {cfg.canBegin && (
+      {cfg.canBegin && viewSession && (
         <>
           <Fade d={160}>
             <Card style={{margin:"24px 24px 0",padding:0,overflow:"hidden"}}>
               <div style={{height:2,background:`linear-gradient(90deg,${accent.main},${accent.main}00)`,transition:`background 400ms ${T.ease}`}}/>
               <div style={{padding:"20px 22px 24px"}}>
                 <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:16}}>Session overview</div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",paddingBottom:18,marginBottom:18,borderBottom:`1px solid ${T.bg3}`}}>
-                  {[["5","Blocks"],["~65 min","Duration"],["2","Supersets"]].map(([v,l])=>(
-                    <div key={l}>
-                      <div style={{fontFamily:T.serif,fontSize:24,fontWeight:400,lineHeight:1}}>{v}</div>
-                      <div style={{fontSize:11,color:T.text3,marginTop:4}}>{l}</div>
+                {/* Stats row — derived from session */}
+                {(()=>{
+                  const supersets = viewSession.blocks.filter(b=>b.type==="superset").length;
+                  return (
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",paddingBottom:18,marginBottom:18,borderBottom:`1px solid ${T.bg3}`}}>
+                      {[[String(viewSession.blocks.length),"Blocks"],["~65 min","Duration"],[String(supersets),"Supersets"]].map(([v,l])=>(
+                        <div key={l}>
+                          <div style={{fontFamily:T.serif,fontSize:24,fontWeight:400,lineHeight:1}}>{v}</div>
+                          <div style={{fontSize:11,color:T.text3,marginTop:4}}>{l}</div>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-                {[
-                  {name:"Barbell Back Squat",         detail:"3×5",  tag:"Main"},
-                  {name:"Barbell Bench Press",         detail:"3×5",  tag:"Main"},
-                  {name:"Reverse Lunge ↔ RDL",        detail:"3×8",  tag:"Superset"},
-                  {name:"Hip Thrust ↔ Landmine Press", detail:"3×10", tag:"Superset"},
-                  {name:"Leg Raise ↔ Dead Bug",        detail:"2×10", tag:"Finisher"},
-                ].map((ex,i,arr)=>(
-                  <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:i<arr.length-1?`1px solid ${T.bg3}`:"none"}}>
-                    <div style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0}}>
-                      <div style={{width:6,height:6,borderRadius:"50%",background:ex.tag==="Main"?T.coral:ex.tag==="Superset"?T.sage:T.gold,flexShrink:0}}/>
-                      <span style={{fontSize:13,color:T.text1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{ex.name}</span>
+                  );
+                })()}
+                {/* Exercise list — derived from session blocks */}
+                {viewSession.blocks.map((b,i,arr)=>{
+                  const tag   = b.type==="main" ? "Main" : b.type==="superset" ? "Superset" : "Finisher";
+                  const color = tag==="Main" ? T.coral : tag==="Superset" ? T.sage : T.gold;
+                  const name  = b.type==="main"
+                    ? b.ex.name
+                    : `${(b.exA||b.ex).name} ↔ ${(b.exB||b.ex).name}`;
+                  const sets  = b.type==="main"
+                    ? `${b.sets}×${b.ex.reps}`
+                    : `${b.sets}×${b.exA?.reps||b.exB?.reps}`;
+                  return (
+                    <div key={b.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:i<arr.length-1?`1px solid ${T.bg3}`:"none"}}>
+                      <div style={{display:"flex",alignItems:"center",gap:10,flex:1,minWidth:0}}>
+                        <div style={{width:6,height:6,borderRadius:"50%",background:color,flexShrink:0}}/>
+                        <span style={{fontSize:13,color:T.text1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</span>
+                      </div>
+                      <span style={{fontFamily:T.serif,fontSize:13,color:T.text3,fontStyle:"italic",flexShrink:0,marginLeft:12}}>{sets}</span>
                     </div>
-                    <span style={{fontFamily:T.serif,fontSize:13,color:T.text3,fontStyle:"italic",flexShrink:0,marginLeft:12}}>{ex.detail}</span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </Card>
           </Fade>
           <Fade d={220}>
             {isViewingToday ? (
-              /* Today — active CTA */
               <button onClick={onBegin} style={{
                 margin:"16px 24px 0",width:"calc(100% - 48px)",
                 padding:"18px 24px",background:accent.main,border:"none",
@@ -637,7 +595,6 @@ function HomeScreen({streak,profileName,onBegin,onProfile}){
                 <span style={{fontSize:18,color:T.bg0}}>→</span>
               </button>
             ) : (
-              /* Future/past day — preview chip, not a button */
               <div style={{
                 margin:"16px 24px 0",padding:"16px 20px",
                 background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,
@@ -667,6 +624,30 @@ function HomeScreen({streak,profileName,onBegin,onProfile}){
               </div>
             ))}
           </Card>
+        </Fade>
+      )}
+
+      {/* Rotation nudge — surfaces after 4 weeks on a block */}
+      {weeksOnBlock >= 4 && (
+        <Fade d={200}>
+          <div style={{margin:"20px 24px 0",padding:"18px 20px",background:`${T.gold}10`,border:`1px solid ${T.gold}40`,borderRadius:T.r.lg}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:11,fontWeight:500,color:T.gold,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>
+                  Block {programmeBlock?.number} · {weeksOnBlock} weeks
+                </div>
+                <div style={{fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text1,lineHeight:1.3,marginBottom:4}}>
+                  Time to rotate accessories
+                </div>
+                <div style={{fontSize:12,color:T.text3,lineHeight:1.5}}>
+                  Your body has adapted. New exercises, same muscle targets.
+                </div>
+              </div>
+              <button onClick={onRotate} style={{flexShrink:0,marginTop:2,padding:"10px 16px",background:T.gold,border:"none",borderRadius:T.r.md,cursor:"pointer",fontFamily:T.serif,fontSize:14,fontWeight:400,color:T.bg0}}>
+                Rotate →
+              </button>
+            </div>
+          </div>
         </Fade>
       )}
     </div>
@@ -740,11 +721,11 @@ function RpeCard({onPick,label="How was that set?"}){
 }
 
 // ─── Session ───────────────────────────────────────────────────────────────────
-function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,showVid,setShowVid,getW,getR,editTarget,setEditTarget,workingWeights,setWW,workingReps,setWR,awaitRpe,ssRoundDone,restActive,restRemain,setRestActive,setRestRemain,onCommit,onLog,onQuit}){
+function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,resolvedExA,resolvedExB,resolvedEx,swapKey,onSwap,showVid,setShowVid,getW,getR,editTarget,setEditTarget,workingWeights,setWW,workingReps,setWR,awaitRpe,ssRoundDone,restActive,restRemain,setRestActive,setRestRemain,onCommit,onLog,onQuit}){
   const {strength:s}=T;
   const [swapEx,setSwapEx]=useState(null);
-  const partnerEx=isSS?(phase==="A"?block.exB:block.exA):null;
-  const vidEx    =isSS?(phase==="A"?block.exA:block.exB):block.ex;
+  const partnerEx=isSS?(phase==="A"?resolvedExB:resolvedExA):null;
+  const vidEx    =isSS?(phase==="A"?resolvedExA:resolvedExB):resolvedEx;
   const progress =((blockIdx+(setNum-1)/block.sets)/totalBlocks)*100;
   const nameFz   =Math.min(38,Math.max(24,300/(activeEx?.name?.length||10)));
   const typeLabel={main:"Main lift",superset:"Superset",finisher:"Finisher"}[block.type];
@@ -763,7 +744,7 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
       <div style={{padding:"16px 20px 0",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
         <button onClick={onQuit} style={{background:"none",border:"none",padding:0,cursor:"pointer",fontSize:12,color:T.text3,fontFamily:T.sans}}>← Quit</button>
         <div style={{textAlign:"right"}}>
-          <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.1em",textTransform:"uppercase"}}>Strength A</div>
+          <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.1em",textTransform:"uppercase"}}>{session.name}</div>
           <div style={{fontSize:10,color:T.text3,fontStyle:"italic",fontFamily:T.serif,marginTop:1}}>{block.label}</div>
         </div>
       </div>
@@ -857,7 +838,7 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
         </Card>
       )}
       {editTarget&&<DrumEditOverlay target={editTarget} workingWeights={workingWeights} setWW={setWW} workingReps={workingReps} setWR={setWR} block={block} onClose={()=>setEditTarget(null)}/>}
-      {swapEx&&<SwapOverlay activeEx={activeEx} onClose={()=>setSwapEx(null)}/>}
+      {swapEx&&<SwapOverlay activeEx={activeEx} swapKey={swapKey} onSwap={onSwap} onClose={()=>setSwapEx(null)}/>}
       {showVid&&vidEx&&(
         <div onClick={()=>setShowVid(false)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
           <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:24,width:"100%",maxWidth:430,borderTop:`1px solid ${T.coral}33`,animation:`slideUp 280ms ${T.ease}`}}>
@@ -875,27 +856,25 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
   );
 }
 
-// ─── Swap Overlay ──────────────────────────────────────────────────────────────
-const SWAP_DB = {
-  "Barbell Back Squat":   [{name:"Goblet Squat",eq:"Dumbbell"},{name:"Bulgarian Split Squat",eq:"Dumbbell"},{name:"Leg Press",eq:"Machine"},{name:"Hack Squat",eq:"Machine"}],
-  "Barbell Bench Press":  [{name:"Dumbbell Bench Press",eq:"Dumbbell"},{name:"Push-Up",eq:"Bodyweight"},{name:"Dumbbell Floor Press",eq:"Dumbbell"}],
-  "Barbell Reverse Lunge":[{name:"Dumbbell Reverse Lunge",eq:"Dumbbell"},{name:"Step-Up",eq:"Bodyweight"},{name:"Split Squat",eq:"Bodyweight"}],
-  "Romanian Deadlift":    [{name:"Dumbbell RDL",eq:"Dumbbell"},{name:"Good Morning",eq:"Bodyweight"},{name:"Nordic Curl",eq:"Bodyweight"}],
-  "Barbell Hip Thrust":   [{name:"Glute Bridge",eq:"Bodyweight"},{name:"Single-Leg Hip Thrust",eq:"Bodyweight"},{name:"Cable Pull-Through",eq:"Cable"}],
-  "Landmine Press":       [{name:"Dumbbell Shoulder Press",eq:"Dumbbell"},{name:"Arnold Press",eq:"Dumbbell"},{name:"Pike Push-Up",eq:"Bodyweight"}],
-  "Hanging Leg Raise":    [{name:"Lying Leg Raise",eq:"Bodyweight"},{name:"Ab Wheel",eq:"Equipment"},{name:"Reverse Crunch",eq:"Bodyweight"}],
-  "Dead Bug":             [{name:"Hollow Body Hold",eq:"Bodyweight"},{name:"Plank",eq:"Bodyweight"}],
-};
 
-const EQ_COLOUR = {
-  Bodyweight:"#8BB09A", Dumbbell:"#A5B8D0", Cable:"#C4A882",
-  Machine:"#C9A0B8", Barbell:"#E0956A", Band:"#8BB09A",
-  Kettlebell:"#C4A882", Equipment:"#A5B8D0",
-};
+// ─── Swap Overlay ────────────────────────────────────────────────────────────
 
-function SwapOverlay({activeEx,onClose}){
+function SwapOverlay({activeEx,swapKey,onSwap,onClose}){
   const [travel,setTravel]=useState(false);
   const options=(SWAP_DB[activeEx?.name]||[]).filter(o=>!travel||["Bodyweight","Dumbbell","Band"].includes(o.eq));
+
+  const applySwap=(option)=>{
+    // Inherit reps/weight from current slot — same movement pattern, same stimulus level.
+    // User can fine-tune with the drum editor after swapping.
+    onSwap(swapKey, {
+      name:   option.name,
+      muscle: option.muscle,
+      reps:   activeEx?.reps   ?? 10,
+      weight: activeEx?.weight ?? null,
+      vid:    null, // video IDs for swap alternatives not yet catalogued
+    });
+    onClose();
+  };
   return (
     <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:300,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"24px 24px 36px",width:"100%",maxWidth:430,borderTop:`1px solid ${T.bg3}`,animation:`slideUp 260ms ${T.ease}`}}>
@@ -920,9 +899,12 @@ function SwapOverlay({activeEx,onClose}){
         )}
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
           {options.map((o,i)=>(
-            <div key={i} onClick={onClose} style={{padding:"14px 16px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.md,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 180ms ${T.ease}`}}>
-              <span style={{fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text1}}>{o.name}</span>
-              <span style={{fontSize:10,fontWeight:500,color:EQ_COLOUR[o.eq]||T.text3,background:`${EQ_COLOUR[o.eq]||T.bg4}18`,border:`1px solid ${EQ_COLOUR[o.eq]||T.bg4}44`,borderRadius:T.r.pill,padding:"3px 10px",letterSpacing:"0.06em",textTransform:"uppercase",flexShrink:0}}>{o.eq}</span>
+            <div key={i} onClick={()=>applySwap(o)} style={{padding:"14px 16px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.md,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 180ms ${T.ease}`}}>
+              <div>
+                <span style={{fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text1,display:"block"}}>{o.name}</span>
+                <span style={{fontSize:11,color:T.text3,marginTop:2,display:"block"}}>{o.muscle}</span>
+              </div>
+              <span style={{fontSize:10,fontWeight:500,color:EQ_COLOUR[o.eq]||T.text3,background:`${EQ_COLOUR[o.eq]||T.bg4}18`,border:`1px solid ${EQ_COLOUR[o.eq]||T.bg4}44`,borderRadius:T.r.pill,padding:"3px 10px",letterSpacing:"0.06em",textTransform:"uppercase",flexShrink:0,marginLeft:12}}>{o.eq}</span>
             </div>
           ))}
         </div>
