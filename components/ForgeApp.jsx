@@ -204,7 +204,6 @@ export default function ForgeApp(){
     setWWState(P.getWeights(activeProfile));
     setWRState(P.getReps(activeProfile));
     setStreak(P.getStreak(activeProfile).count);
-    // Pull from blob and merge (handles new device)
     blobPull(activeProfile).then(remote=>{
       if(!remote) return;
       setWWState(prev=>{
@@ -238,7 +237,6 @@ export default function ForgeApp(){
     setRestActive(true);
   },[restTrigger]);
 
-  // Persist-aware setters
   const setWW=useCallback((upd)=>{
     setWWState(prev=>{
       const next=typeof upd==="function"?upd(prev):upd;
@@ -289,7 +287,6 @@ export default function ForgeApp(){
       if(phase==="A"){setPhase("B");return;}
       setPhase("A");
       if(block.type==="superset"){setSsRoundDone(true);return;}
-      // Finisher — advance silently
       if(setNum>=block.sets){
         if(blockIdx<SESSION.blocks.length-1){setBlockIdx(p=>p+1);setSetNum(1);setPhase("A");}
         else setScreen("done");
@@ -307,20 +304,6 @@ export default function ForgeApp(){
     setScreen("home");
   };
 
-  const onSessionDone=useCallback(()=>{
-    if(!activeProfile) return;
-    const newStreak=bumpStreak(activeProfile);
-    setStreak(newStreak);
-    // Push to blob
-    blobPush(activeProfile,{
-      weights:workingWeights,
-      reps:workingReps,
-      streak:P.getStreak(activeProfile),
-    });
-    setScreen("done");
-  },[activeProfile,workingWeights,workingReps]);
-
-  // Show done screen via commitLog completing last block
   useEffect(()=>{
     if(screen==="done"&&activeProfile){
       const newStreak=bumpStreak(activeProfile);
@@ -331,7 +314,6 @@ export default function ForgeApp(){
         streak:P.getStreak(activeProfile),
       });
     }
-  // Only run when we transition to done
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[screen==="done"]);
 
@@ -363,18 +345,15 @@ export default function ForgeApp(){
 // ─── Profile Screen ────────────────────────────────────────────────────────────
 function ProfileScreen({existing,current,onActivate,onCancel}){
   const [name,setName]=useState("");
-  const [confirmWipe,setConfirmWipe]=useState(null); // profile name to wipe
+  const [confirmWipe,setConfirmWipe]=useState(null);
   const {strength:s}=T;
 
   const wipeProfile=(n)=>{
-    // Clear all localStorage keys for this profile
     ["weights","reps","streak"].forEach(k=>localStorage.removeItem(`forge:${n}:${k}`));
-    // Remove from profiles list
     const updated=P.list().filter(p=>p!==n);
     LS.set("forge:profiles",updated);
     if(P.getActive()===n){ LS.set("forge:active",null); }
     setConfirmWipe(null);
-    // Force reload to re-seed
     window.location.reload();
   };
 
@@ -421,7 +400,6 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
         </div>
       </Fade>
 
-      {/* Wipe confirmation modal */}
       {confirmWipe&&(
         <div onClick={()=>setConfirmWipe(null)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
           <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px 40px",width:"100%",maxWidth:430,borderTop:`1px solid ${T.rose}33`,animation:`slideUp 240ms ${T.ease}`}}>
@@ -446,7 +424,7 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
   );
 }
 
-// ─── Day config — maps WEEK types to home screen content ─────────────────────
+// ─── Day config ───────────────────────────────────────────────────────────────
 const DAY_CONFIG = {
   strength: {
     headline: ["Strength", "Day A"],
@@ -481,17 +459,44 @@ const DAY_CONFIG = {
 };
 
 // ─── Home ──────────────────────────────────────────────────────────────────────
+const DAY_NAMES = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
+
 function HomeScreen({streak,profileName,onBegin,onProfile}){
-  const dow     = new Date().getDay(); // 0=Sun
-  const weekMap = [6,0,1,2,3,4,5];    // JS day → WEEK index
-  const todayIdx= weekMap[dow];
-  const todayDay= WEEK[todayIdx];
-  const cfg     = DAY_CONFIG[todayDay.type] || DAY_CONFIG.rest;
-  const accent  = T[todayDay.type]||T.rest;
+  const dow      = new Date().getDay(); // 0=Sun
+  const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
+  const todayIdx = weekMap[dow];
+
+  const [viewIdx, setViewIdx] = useState(todayIdx);
+
+  const viewDay        = WEEK[viewIdx];
+  const cfg            = DAY_CONFIG[viewDay.type] || DAY_CONFIG.rest;
+  const accent         = T[viewDay.type] || T.rest;
+  const isViewingToday = viewIdx === todayIdx;
+
+  // Negative diff = earlier this week, positive = later this week
+  const diffDays = viewIdx - todayIdx;
+
+  const dayLabel = diffDays === 0
+    ? "Today"
+    : diffDays === 1
+    ? "Tomorrow"
+    : diffDays === -1
+    ? "Yesterday"
+    : DAY_NAMES[viewIdx];
+
+  // Actual date of the viewed day
+  const viewDate = new Date(Date.now() + diffDays * 86400000);
 
   return (
     <div style={{minHeight:"100vh",paddingBottom:48,position:"relative",overflow:"hidden"}}>
-      <div style={{position:"absolute",top:-180,left:"50%",transform:"translateX(-50%)",width:600,height:500,background:`radial-gradient(ellipse,${accent.glow} 0%,transparent 65%)`,pointerEvents:"none"}}/>
+      {/* Ambient glow — colour transitions with the viewed day */}
+      <div style={{
+        position:"absolute",top:-180,left:"50%",transform:"translateX(-50%)",
+        width:600,height:500,
+        background:`radial-gradient(ellipse,${accent.glow} 0%,transparent 65%)`,
+        pointerEvents:"none",
+        transition:`background 400ms ${T.ease}`,
+      }}/>
 
       {/* Header */}
       <Fade d={0}>
@@ -513,43 +518,83 @@ function HomeScreen({streak,profileName,onBegin,onProfile}){
         </div>
       </Fade>
 
-      {/* Today headline — driven by actual day */}
+      {/* Week strip — tappable */}
       <Fade d={60}>
-        <div style={{padding:"32px 24px 0"}}>
-          <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:10}}>Today</div>
-          <div style={{fontFamily:T.serif,fontSize:42,fontWeight:300,lineHeight:1.1}}>
-            {cfg.headline[0]}<br/>
-            {cfg.headline[1]&&<span style={{color:accent.main,fontStyle:"italic"}}>{cfg.headline[1]}</span>}
-          </div>
-          <div style={{fontSize:14,color:T.text2,marginTop:10,lineHeight:1.5}}
-            dangerouslySetInnerHTML={{__html:cfg.sub.replace("&","&amp;")}}/>
-        </div>
-      </Fade>
-
-      {/* Week strip */}
-      <Fade d={120}>
         <div style={{padding:"28px 24px 0",display:"flex",gap:8}}>
           {WEEK.map((d,i)=>{
-            const a=T[d.type];
-            const isToday=i===todayIdx;
+            const a       = T[d.type];
+            const isToday = i === todayIdx;
+            const isView  = i === viewIdx;
             return (
-              <div key={i} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
-                <div style={{width:34,height:34,borderRadius:"50%",background:isToday?a.main:T.bg2,border:`1px solid ${isToday?a.main:T.bg3}`,display:"flex",alignItems:"center",justifyContent:"center",boxShadow:isToday?`0 0 20px ${a.glow}`:"none"}}>
-                  <span style={{fontSize:12,fontWeight:500,color:isToday?T.bg0:T.text3}}>{d.s}</span>
+              <div key={i} onClick={()=>setViewIdx(i)}
+                style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:6,cursor:"pointer"}}>
+                <div style={{
+                  width:34,height:34,borderRadius:"50%",
+                  background: isToday ? a.main : isView ? `${a.main}20` : T.bg2,
+                  border:`${isView && !isToday ? "2px" : "1px"} solid ${isToday || isView ? a.main : T.bg3}`,
+                  display:"flex",alignItems:"center",justifyContent:"center",
+                  boxShadow: isToday
+                    ? `0 0 20px ${a.glow}`
+                    : isView
+                    ? `0 0 10px ${a.glow}`
+                    : "none",
+                  transition:`all 200ms ${T.ease}`,
+                }}>
+                  <span style={{
+                    fontSize:12,fontWeight:500,
+                    color: isToday ? T.bg0 : isView ? a.main : T.text3,
+                    transition:`color 200ms ${T.ease}`,
+                  }}>{d.s}</span>
                 </div>
-                <span style={{fontSize:8,fontWeight:500,color:isToday?a.main:T.text4,letterSpacing:"0.06em",textTransform:"uppercase"}}>{d.label}</span>
+                <span style={{
+                  fontSize:8,fontWeight:500,
+                  color: isToday ? a.main : isView ? a.main : T.text4,
+                  letterSpacing:"0.06em",textTransform:"uppercase",
+                  transition:`color 200ms ${T.ease}`,
+                }}>{d.label}</span>
               </div>
             );
           })}
         </div>
       </Fade>
 
-      {/* Strength day — full session card + begin button */}
-      {cfg.canBegin&&(
+      {/* Day headline — driven by viewIdx */}
+      <Fade d={100}>
+        <div style={{padding:"28px 24px 0"}}>
+          {/* "Today" / "Tomorrow" / day-name label row */}
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+            <div style={{
+              fontSize:11,fontWeight:500,letterSpacing:"0.12em",textTransform:"uppercase",
+              color: isViewingToday ? T.text3 : accent.main,
+              transition:`color 300ms ${T.ease}`,
+            }}>
+              {dayLabel}
+            </div>
+            {!isViewingToday && (
+              <span style={{fontSize:10,color:T.text4,fontFamily:T.serif,fontStyle:"italic"}}>
+                {viewDate.toLocaleDateString("en-GB",{day:"numeric",month:"short"})}
+              </span>
+            )}
+          </div>
+          <div style={{fontFamily:T.serif,fontSize:42,fontWeight:300,lineHeight:1.1}}>
+            {cfg.headline[0]}<br/>
+            {cfg.headline[1] && (
+              <span style={{color:accent.main,fontStyle:"italic",transition:`color 300ms ${T.ease}`}}>
+                {cfg.headline[1]}
+              </span>
+            )}
+          </div>
+          <div style={{fontSize:14,color:T.text2,marginTop:10,lineHeight:1.5}}
+            dangerouslySetInnerHTML={{__html:cfg.sub.replace("&","&amp;")}}/>
+        </div>
+      </Fade>
+
+      {/* Strength day — session card + CTA */}
+      {cfg.canBegin && (
         <>
-          <Fade d={180}>
+          <Fade d={160}>
             <Card style={{margin:"24px 24px 0",padding:0,overflow:"hidden"}}>
-              <div style={{height:2,background:`linear-gradient(90deg,${accent.main},${accent.main}00)`}}/>
+              <div style={{height:2,background:`linear-gradient(90deg,${accent.main},${accent.main}00)`,transition:`background 400ms ${T.ease}`}}/>
               <div style={{padding:"20px 22px 24px"}}>
                 <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:16}}>Session overview</div>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",paddingBottom:18,marginBottom:18,borderBottom:`1px solid ${T.bg3}`}}>
@@ -578,25 +623,46 @@ function HomeScreen({streak,profileName,onBegin,onProfile}){
               </div>
             </Card>
           </Fade>
-          <Fade d={240}>
-            <button onClick={onBegin} style={{margin:"16px 24px 0",width:"calc(100% - 48px)",padding:"18px 24px",background:accent.main,border:"none",borderRadius:T.r.lg,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",boxShadow:`0 12px 40px ${accent.glow}`}}>
-              <span style={{fontFamily:T.serif,fontSize:20,fontWeight:400,color:T.bg0}}>Begin session</span>
-              <span style={{fontSize:18,color:T.bg0}}>→</span>
-            </button>
+          <Fade d={220}>
+            {isViewingToday ? (
+              /* Today — active CTA */
+              <button onClick={onBegin} style={{
+                margin:"16px 24px 0",width:"calc(100% - 48px)",
+                padding:"18px 24px",background:accent.main,border:"none",
+                borderRadius:T.r.lg,cursor:"pointer",
+                display:"flex",alignItems:"center",justifyContent:"space-between",
+                boxShadow:`0 12px 40px ${accent.glow}`,
+              }}>
+                <span style={{fontFamily:T.serif,fontSize:20,fontWeight:400,color:T.bg0}}>Begin session</span>
+                <span style={{fontSize:18,color:T.bg0}}>→</span>
+              </button>
+            ) : (
+              /* Future/past day — preview chip, not a button */
+              <div style={{
+                margin:"16px 24px 0",padding:"16px 20px",
+                background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,
+                display:"flex",alignItems:"center",justifyContent:"space-between",
+              }}>
+                <span style={{fontFamily:T.serif,fontSize:15,fontWeight:300,color:T.text3,fontStyle:"italic"}}>
+                  {dayLabel}'s session
+                </span>
+                <Tag color={accent.main}>{dayLabel}</Tag>
+              </div>
+            )}
           </Fade>
         </>
       )}
 
-      {/* Non-strength day — tips card, no begin button */}
-      {!cfg.canBegin&&cfg.tips&&(
-        <Fade d={180}>
+      {/* Non-strength day — tips card */}
+      {!cfg.canBegin && cfg.tips && (
+        <Fade d={160}>
           <Card style={{margin:"24px 24px 0",padding:"20px 22px 24px"}}>
             <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:16}}>
-              {todayDay.type==="rest"?"Recovery notes":"Session notes"}
+              {viewDay.type==="rest" ? "Recovery notes" : "Session notes"}
             </div>
             {cfg.tips.map((tip,i)=>(
               <div key={i} style={{display:"flex",alignItems:"flex-start",gap:12,padding:"8px 0",borderBottom:i<cfg.tips.length-1?`1px solid ${T.bg3}`:"none"}}>
-                <div style={{width:6,height:6,borderRadius:"50%",background:accent.main,flexShrink:0,marginTop:5}}/>
+                <div style={{width:6,height:6,borderRadius:"50%",background:accent.main,flexShrink:0,marginTop:5,transition:`background 300ms ${T.ease}`}}/>
                 <span style={{fontSize:13,color:T.text2,lineHeight:1.5}}>{tip}</span>
               </div>
             ))}
@@ -706,7 +772,6 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
         {isSS&&<Tag color={T.steel}>Exercise {phase}</Tag>}
       </div>
       <div style={{padding:"14px 20px 0"}}>
-        {/* Exercise name — tapping name opens video */}
         <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
           <div onClick={()=>setShowVid(true)} style={{cursor:"pointer",flex:1,userSelect:"none"}}>
             <div style={{fontFamily:T.serif,fontSize:nameFz,fontWeight:300,lineHeight:1.1}}>{activeEx?.name}</div>
@@ -715,7 +780,6 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
               <span style={{fontSize:11,color:T.text3}}>{activeEx?.muscle}</span>
             </div>
           </div>
-          {/* Swap button — clearly labelled, separate from video tap */}
           <button
             onClick={()=>setSwapEx({block,phase})}
             style={{marginTop:4,flexShrink:0,background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.md,padding:"8px 12px",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3,transition:`all 180ms ${T.ease}`}}
@@ -812,7 +876,6 @@ function SessionScreen({block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,sh
 }
 
 // ─── Swap Overlay ──────────────────────────────────────────────────────────────
-// Near-match alternatives by muscle group. Travel mode filters to bodyweight/dumbbell.
 const SWAP_DB = {
   "Barbell Back Squat":   [{name:"Goblet Squat",eq:"Dumbbell"},{name:"Bulgarian Split Squat",eq:"Dumbbell"},{name:"Leg Press",eq:"Machine"},{name:"Hack Squat",eq:"Machine"}],
   "Barbell Bench Press":  [{name:"Dumbbell Bench Press",eq:"Dumbbell"},{name:"Push-Up",eq:"Bodyweight"},{name:"Dumbbell Floor Press",eq:"Dumbbell"}],
@@ -822,21 +885,6 @@ const SWAP_DB = {
   "Landmine Press":       [{name:"Dumbbell Shoulder Press",eq:"Dumbbell"},{name:"Arnold Press",eq:"Dumbbell"},{name:"Pike Push-Up",eq:"Bodyweight"}],
   "Hanging Leg Raise":    [{name:"Lying Leg Raise",eq:"Bodyweight"},{name:"Ab Wheel",eq:"Equipment"},{name:"Reverse Crunch",eq:"Bodyweight"}],
   "Dead Bug":             [{name:"Hollow Body Hold",eq:"Bodyweight"},{name:"Plank",eq:"Bodyweight"}],
-  "Hex Bar Deadlift":     [{name:"Dumbbell Deadlift",eq:"Dumbbell"},{name:"Romanian Deadlift",eq:"Barbell"},{name:"Sumo Deadlift",eq:"Barbell"}],
-  "Barbell Overhead Press":[{name:"Dumbbell Shoulder Press",eq:"Dumbbell"},{name:"Arnold Press",eq:"Dumbbell"},{name:"Pike Push-Up",eq:"Bodyweight"}],
-  "Leg Press":            [{name:"Goblet Squat",eq:"Dumbbell"},{name:"Bulgarian Split Squat",eq:"Dumbbell"},{name:"Wall Sit",eq:"Bodyweight"}],
-  "Pull-Up":              [{name:"Lat Pulldown",eq:"Cable"},{name:"Resistance Band Pull-Down",eq:"Band"},{name:"TRX Row",eq:"Bodyweight"}],
-  "Machine Hamstring Curl":[{name:"Nordic Curl",eq:"Bodyweight"},{name:"Dumbbell Leg Curl",eq:"Dumbbell"},{name:"Swiss Ball Curl",eq:"Equipment"}],
-  "Barbell Hip Thrust":   [{name:"Glute Bridge",eq:"Bodyweight"},{name:"Cable Pull-Through",eq:"Cable"},{name:"Donkey Kick",eq:"Bodyweight"}],
-  "Power Clean":          [{name:"Dumbbell Hang Clean",eq:"Dumbbell"},{name:"Kettlebell Swing",eq:"Kettlebell"},{name:"Jump Squat",eq:"Bodyweight"}],
-  "DB Walking Lunges":    [{name:"Reverse Lunge",eq:"Bodyweight"},{name:"Step-Up",eq:"Bodyweight"},{name:"Split Squat",eq:"Bodyweight"}],
-  "Cable Pull-Through":   [{name:"Good Morning",eq:"Bodyweight"},{name:"Glute Bridge",eq:"Bodyweight"},{name:"Resistance Band Pull-Through",eq:"Band"}],
-  "Incline DB Bench":     [{name:"Incline Push-Up",eq:"Bodyweight"},{name:"Dumbbell Chest Fly",eq:"Dumbbell"},{name:"Cable Chest Fly",eq:"Cable"}],
-  "Cable Row":            [{name:"Dumbbell Bent-Over Row",eq:"Dumbbell"},{name:"TRX Row",eq:"Bodyweight"},{name:"Resistance Band Row",eq:"Band"}],
-  "DB Hammer Curl":       [{name:"Resistance Band Curl",eq:"Band"},{name:"Chin-Up",eq:"Bodyweight"},{name:"Supinated Dumbbell Curl",eq:"Dumbbell"}],
-  "Tricep Dips":          [{name:"Close-Grip Push-Up",eq:"Bodyweight"},{name:"Overhead Tricep Extension",eq:"Dumbbell"},{name:"Resistance Band Pushdown",eq:"Band"}],
-  "Face Pull":            [{name:"Resistance Band Face Pull",eq:"Band"},{name:"Rear Delt Fly",eq:"Dumbbell"},{name:"Y-T-W Raise",eq:"Bodyweight"}],
-  "Lateral Raise":        [{name:"Resistance Band Lateral Raise",eq:"Band"},{name:"Cable Lateral Raise",eq:"Cable"}],
 };
 
 const EQ_COLOUR = {
@@ -858,7 +906,6 @@ function SwapOverlay({activeEx,onClose}){
           </div>
           <button onClick={onClose} style={{background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,padding:"6px 10px",cursor:"pointer",color:T.text2,fontSize:13}}>✕</button>
         </div>
-        {/* Travel mode toggle */}
         <div style={{display:"flex",alignItems:"center",gap:10,margin:"14px 0",padding:"10px 14px",background:T.bg3,borderRadius:T.r.md,cursor:"pointer"}} onClick={()=>setTravel(p=>!p)}>
           <div style={{width:32,height:18,borderRadius:9,background:travel?T.coral:T.bg4,position:"relative",transition:`background 200ms ${T.ease}`,flexShrink:0}}>
             <div style={{position:"absolute",top:2,left:travel?14:2,width:14,height:14,borderRadius:"50%",background:"#fff",transition:`left 200ms ${T.ease}`}}/>
