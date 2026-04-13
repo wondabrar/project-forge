@@ -9,7 +9,7 @@ import {
 import {
   LS, P, PB, bumpStreak,
   blobPull, blobPush,
-  roundPlate, applyRpe, weeksSince,
+  roundPlate, applyRpe, weeksSince, weekKey,
 } from "@/lib/storage";
 
 // ─── Tokens ────────────────────────────────────────────────────────────────────
@@ -104,6 +104,7 @@ export default function ForgeApp(){
   const [activeSessionIdx,setActiveSessionIdx]=useState(0);
   const [sessionSwaps,setSessionSwaps]=useState({});
   const [programmeBlock,setProgrammeBlock]=useState(()=>PB.get());
+  const [weekDone,setWeekDone]=useState({});
   const [blockIdx,setBlockIdx]=useState(0);
   const [setNum,setSetNum]=useState(1);
   const [phase,setPhase]=useState("A");
@@ -124,6 +125,7 @@ export default function ForgeApp(){
     setWWState(P.getWeights(activeProfile));
     setWRState(P.getReps(activeProfile));
     setStreak(P.getStreak(activeProfile).count);
+    setWeekDone(P.getWeekDone(activeProfile));
     blobPull(activeProfile).then(remote=>{
       if(!remote) return;
       setWWState(prev=>{
@@ -257,6 +259,11 @@ export default function ForgeApp(){
     if(screen==="done"&&activeProfile){
       const newStreak=bumpStreak(activeProfile);
       setStreak(newStreak);
+      // Mark today as done in the week strip
+      const dw=new Date().getDay();
+      const wm=[6,0,1,2,3,4,5];
+      const updated=P.markDayDone(activeProfile,wm[dw]);
+      setWeekDone(updated);
       blobPush(activeProfile,{
         weights:workingWeights,
         reps:workingReps,
@@ -266,6 +273,18 @@ export default function ForgeApp(){
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   },[screen==="done"]);
+
+  // Mark a non-strength day complete (zone 2, cardio, HIIT, rest)
+  const handleMarkDayDone = useCallback(()=>{
+    if(!activeProfile) return;
+    const dw=new Date().getDay();
+    const wm=[6,0,1,2,3,4,5];
+    const idx=wm[dw];
+    const updated=P.markDayDone(activeProfile,idx);
+    setWeekDone(updated);
+    const newStreak=bumpStreak(activeProfile);
+    setStreak(newStreak);
+  },[activeProfile]);
 
   if(!mounted) return null;
 
@@ -309,7 +328,7 @@ export default function ForgeApp(){
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"      && <HomeScreen streak={streak} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate}/>}
+      {screen==="home"      && <HomeScreen streak={streak} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate}/>}
       {screen==="readiness" && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} onStart={()=>setScreen("session")}/>}
       {screen==="session"   && <SessionScreen   {...sProps}/>}
       {screen==="done"      && <DoneScreen       session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/>}
@@ -400,7 +419,7 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
 }
 
 // ─── Home ──────────────────────────────────────────────────────────────────────
-function HomeScreen({streak,profileName,onBegin,onProfile,programmeBlock,weeksOnBlock,onRotate}){
+function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -472,30 +491,26 @@ function HomeScreen({streak,profileName,onBegin,onProfile,programmeBlock,weeksOn
             const a       = T[d.type];
             const isToday = i === todayIdx;
             const isView  = i === viewIdx;
+            const isDone  = weekDone[i];
             return (
               <div key={i} onClick={()=>setViewIdx(i)}
                 style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:6,cursor:"pointer"}}>
                 <div style={{
                   width:34,height:34,borderRadius:"50%",
-                  background: isToday ? a.main : isView ? `${a.main}20` : T.bg2,
-                  border:`${isView && !isToday ? "2px" : "1px"} solid ${isToday || isView ? a.main : T.bg3}`,
+                  background: isToday ? a.main : isDone ? `${a.main}28` : isView ? `${a.main}20` : T.bg2,
+                  border:`${isView && !isToday ? "2px" : "1px"} solid ${isToday || isView || isDone ? a.main : T.bg3}`,
                   display:"flex",alignItems:"center",justifyContent:"center",
-                  boxShadow: isToday
-                    ? `0 0 20px ${a.glow}`
-                    : isView
-                    ? `0 0 10px ${a.glow}`
-                    : "none",
+                  boxShadow: isToday ? `0 0 20px ${a.glow}` : isView ? `0 0 10px ${a.glow}` : "none",
                   transition:`all 200ms ${T.ease}`,
                 }}>
-                  <span style={{
-                    fontSize:12,fontWeight:500,
-                    color: isToday ? T.bg0 : isView ? a.main : T.text3,
-                    transition:`color 200ms ${T.ease}`,
-                  }}>{d.s}</span>
+                  {isDone && !isToday
+                    ? <span style={{fontSize:14,color:a.main,lineHeight:1}}>✓</span>
+                    : <span style={{fontSize:12,fontWeight:500,color:isToday?T.bg0:isView?a.main:T.text3,transition:`color 200ms ${T.ease}`}}>{d.s}</span>
+                  }
                 </div>
                 <span style={{
                   fontSize:8,fontWeight:500,
-                  color: isToday ? a.main : isView ? a.main : T.text4,
+                  color: isToday ? a.main : isDone ? a.main : isView ? a.main : T.text4,
                   letterSpacing:"0.06em",textTransform:"uppercase",
                   transition:`color 200ms ${T.ease}`,
                 }}>{d.label}</span>
@@ -583,7 +598,12 @@ function HomeScreen({streak,profileName,onBegin,onProfile,programmeBlock,weeksOn
             </Card>
           </Fade>
           <Fade d={220}>
-            {isViewingToday ? (
+            {isViewingToday && weekDone[todayIdx] ? (
+              <div style={{margin:"16px 24px 0",padding:"16px 20px",background:`${accent.main}10`,border:`1px solid ${accent.main}40`,borderRadius:T.r.lg,display:"flex",alignItems:"center",gap:12}}>
+                <span style={{fontSize:18,color:accent.main}}>✓</span>
+                <span style={{fontFamily:T.serif,fontSize:16,fontWeight:300,color:accent.main,fontStyle:"italic"}}>Session complete. See you next time.</span>
+              </div>
+            ) : isViewingToday ? (
               <button onClick={onBegin} style={{
                 margin:"16px 24px 0",width:"calc(100% - 48px)",
                 padding:"18px 24px",background:accent.main,border:"none",
@@ -610,7 +630,7 @@ function HomeScreen({streak,profileName,onBegin,onProfile,programmeBlock,weeksOn
         </>
       )}
 
-      {/* Non-strength day — tips card */}
+      {/* Non-strength day — tips card + mark complete */}
       {!cfg.canBegin && cfg.tips && (
         <Fade d={160}>
           <Card style={{margin:"24px 24px 0",padding:"20px 22px 24px"}}>
@@ -624,6 +644,26 @@ function HomeScreen({streak,profileName,onBegin,onProfile,programmeBlock,weeksOn
               </div>
             ))}
           </Card>
+        </Fade>
+      )}
+      {!cfg.canBegin && isViewingToday && (
+        <Fade d={220}>
+          {weekDone[todayIdx] ? (
+            <div style={{margin:"12px 24px 0",padding:"16px 20px",background:`${accent.main}10`,border:`1px solid ${accent.main}40`,borderRadius:T.r.lg,display:"flex",alignItems:"center",gap:12}}>
+              <span style={{fontSize:18,color:accent.main}}>✓</span>
+              <span style={{fontFamily:T.serif,fontSize:16,fontWeight:300,color:accent.main,fontStyle:"italic"}}>Done. Streak maintained.</span>
+            </div>
+          ) : (
+            <button onClick={onMarkDayDone} style={{
+              margin:"12px 24px 0",width:"calc(100% - 48px)",
+              padding:"16px 20px",background:"transparent",
+              border:`1px solid ${accent.main}`,borderRadius:T.r.lg,cursor:"pointer",
+              display:"flex",alignItems:"center",justifyContent:"space-between",
+            }}>
+              <span style={{fontFamily:T.serif,fontSize:18,fontWeight:300,color:accent.main}}>Mark complete</span>
+              <span style={{fontSize:16,color:accent.main}}>✓</span>
+            </button>
+          )}
         </Fade>
       )}
 
@@ -847,11 +887,13 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
           <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:24,width:"100%",maxWidth:430,borderTop:`1px solid ${T.coral}33`,animation:`slideUp 280ms ${T.ease}`}}>
             <style>{`@keyframes slideUp{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
-              <div><div style={{fontFamily:T.serif,fontSize:22,fontWeight:300,lineHeight:1.1}}>{vidEx.name}</div>
-              <div style={{fontSize:12,color:T.text3,marginTop:4}}>{vidEx.muscle}</div></div>
+              <div>
+                <div style={{fontFamily:T.serif,fontSize:22,fontWeight:300,lineHeight:1.1}}>{vidEx.name}</div>
+                <div style={{fontSize:12,color:T.text3,marginTop:4}}>{vidEx.muscle}</div>
+              </div>
               <button onClick={()=>setShowVid(false)} style={{background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,padding:"6px 10px",cursor:"pointer",color:T.text2,fontSize:13}}>✕</button>
             </div>
-            <iframe src={`https://www.youtube.com/embed/${vidEx.vid}?autoplay=0&modestbranding=1&rel=0`} style={{width:"100%",aspectRatio:"16/9",border:"none",borderRadius:T.r.md,background:T.bg0,display:"block"}} allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowFullScreen/>
+            <VideoEmbed vid={vidEx.vid} name={vidEx.name}/>
           </div>
         </div>
       )}
@@ -859,6 +901,38 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
   );
 }
 
+
+// ─── Video Embed ───────────────────────────────────────────────────────────────
+// Handles embedding disabled / private videos gracefully.
+// If the iframe fails to load (e.g. embedding disabled), shows a direct YouTube link.
+function VideoEmbed({vid,name}){
+  const [failed,setFailed]=useState(false);
+  if(!vid||failed){
+    return(
+      <div style={{width:"100%",aspectRatio:"16/9",background:T.bg3,borderRadius:T.r.md,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:10}}>
+        <span style={{fontSize:13,color:T.text3,fontStyle:"italic",fontFamily:T.serif}}>
+          {!vid?"No demo video linked yet":"Video unavailable here"}
+        </span>
+        {vid&&(
+          <a href={`https://www.youtube.com/watch?v=${vid}`} target="_blank" rel="noopener noreferrer"
+            style={{fontSize:12,color:T.coral,fontWeight:500,textDecoration:"none"}}>
+            Watch on YouTube ↗
+          </a>
+        )}
+      </div>
+    );
+  }
+  return(
+    <iframe
+      key={vid}
+      src={`https://www.youtube.com/embed/${vid}?autoplay=0&modestbranding=1&rel=0`}
+      style={{width:"100%",aspectRatio:"16/9",border:"none",borderRadius:T.r.md,background:T.bg0,display:"block"}}
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+      allowFullScreen
+      onError={()=>setFailed(true)}
+    />
+  );
+}
 
 // ─── Swap Overlay ────────────────────────────────────────────────────────────
 
@@ -951,22 +1025,55 @@ function DrumEditOverlay({target,workingWeights,setWW,workingReps,setWR,block,on
 }
 
 // ─── Done ──────────────────────────────────────────────────────────────────────
-function DoneScreen({profileName,workingWeights,onHome}){
-  const nudges=SESSION.blocks.filter(b=>b.type==="main").map(b=>{
-    const base=b.ex.weight,current=workingWeights[b.ex.name]??base;
-    return{ex:b.ex.name,base,current,changed:current!==base};
+const DONE_HEADLINES = [
+  ["Solid", "work."],
+  ["That's", "a session."],
+  ["Job", "done."],
+  ["Nothing", "wasted."],
+];
+const NEXT_DAY_MSG = {
+  zone2:  "Zone 2 tomorrow. 60 min, conversational pace.",
+  cardio: "Moderate cardio tomorrow. 35 min at ~75%.",
+  hiit:   "HIIT tomorrow. 8–10 rounds, all out.",
+  rest:   "Rest day tomorrow. You've earned it.",
+  strength:"Strength session next. Load up.",
+};
+
+function DoneScreen({session,profileName,workingWeights,onHome}){
+  const nudges = session.blocks.filter(b=>b.type==="main").map(b=>{
+    const base    = b.ex.weight;
+    const current = workingWeights[b.ex.name] ?? base;
+    return { ex:b.ex.name, base, current, changed:current!==base };
   });
+
+  // Pick a random headline pair, stable for this render
+  const [hi] = useState(()=>DONE_HEADLINES[Math.floor(Math.random()*DONE_HEADLINES.length)]);
+
+  // Derive what's next
+  const dow     = new Date().getDay();
+  const weekMap = [6,0,1,2,3,4,5];
+  const todayIdx= weekMap[dow];
+  const nextIdx = (todayIdx+1) % 7;
+  const nextType= WEEK[nextIdx]?.type ?? "rest";
+  const nextMsg = NEXT_DAY_MSG[nextType] ?? "";
+
   return (
     <div style={{minHeight:"100vh",padding:"72px 24px 0",position:"relative",overflow:"hidden"}}>
       <div style={{position:"absolute",top:-120,left:"50%",transform:"translateX(-50%)",width:420,height:380,background:`radial-gradient(circle,${T.strength.glow} 0%,transparent 65%)`,pointerEvents:"none"}}/>
       <Fade d={0}>
-        <div style={{fontFamily:T.serif,fontSize:13,fontWeight:300,fontStyle:"italic",color:T.text3,marginBottom:12}}>{profileName} · Strength A</div>
-        <div style={{fontFamily:T.serif,fontSize:42,fontWeight:300,lineHeight:1.1,marginBottom:8}}>
-          Session<br/><span style={{color:T.coral,fontStyle:"italic"}}>complete.</span>
+        <div style={{fontFamily:T.serif,fontSize:13,fontWeight:300,fontStyle:"italic",color:T.text3,marginBottom:12}}>
+          {profileName} · {session.name}
         </div>
-        <p style={{fontSize:14,color:T.text2,marginBottom:32,lineHeight:1.6}}>Zone 2 tomorrow. 60 min, easy pace.</p>
+        <div style={{fontFamily:T.serif,fontSize:48,fontWeight:300,lineHeight:1.05,marginBottom:8}}>
+          {hi[0]}<br/><span style={{color:T.coral,fontStyle:"italic"}}>{hi[1]}</span>
+        </div>
+        <p style={{fontSize:14,color:T.text2,marginBottom:32,lineHeight:1.6}}>{nextMsg}</p>
       </Fade>
-      <Fade d={80}><div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:12}}>Main lifts</div></Fade>
+      {nudges.length > 0 && (
+        <Fade d={80}>
+          <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:12}}>Main lifts</div>
+        </Fade>
+      )}
       {nudges.map((n,i)=>(
         <Fade key={i} d={120+i*60}>
           <Card style={{padding:"16px 20px",marginBottom:10,borderLeft:`2px solid ${n.changed?T.coral:T.bg4}`}}>
