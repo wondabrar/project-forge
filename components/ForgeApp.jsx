@@ -13,6 +13,7 @@ import {
   roundPlate, applyRpe, weeksSince, weekKey,
   newDraftLog, logSet, finaliseDraft, scaleForReadiness,
 } from "@/lib/storage";
+import PerformanceLab from "@/components/PerformanceLab";
 
 // ─── Tokens ────────────────────────────────────────────────────────────────────
 const T = {
@@ -124,6 +125,8 @@ export default function ForgeApp(){
   const draftLogRef = useRef(null);
   // Shown when auto-rotation fires — acknowledge before starting session
   const [rotationSummary,setRotationSummary]=useState(null);
+  // Full session history — loaded from localStorage, merged from blob
+  const [history,setHistory]=useState([]);
 
   // Seed on profile change + pull from blob
   useEffect(()=>{
@@ -132,6 +135,7 @@ export default function ForgeApp(){
     setWRState(P.getReps(activeProfile));
     setStreak(P.getStreak(activeProfile).count);
     setWeekDone(P.getWeekDone(activeProfile));
+    setHistory(H.get(activeProfile));
 
     // Retry any failed pushes from previous sessions
     flushPendingPushes((profile) => ({
@@ -177,6 +181,7 @@ export default function ForgeApp(){
       if (remoteHistory.length) {
         const merged = H.merge(H.get(activeProfile), remoteHistory);
         H.save(activeProfile, merged);
+        setHistory(merged);
       }
     });
   },[activeProfile]);
@@ -356,6 +361,8 @@ export default function ForgeApp(){
       if (draftLogRef.current) {
         sessionRecord = finaliseDraft(draftLogRef.current);
         H.append(activeProfile, sessionRecord);
+        // Reflect in React state so Performance Lab updates immediately
+        setHistory(H.get(activeProfile));
         draftLogRef.current = null;
       }
 
@@ -469,11 +476,12 @@ export default function ForgeApp(){
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"      && <HomeScreen streak={streak} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate}/>}
-      {screen==="readiness" && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} onStart={handleReadinessStart}/>}
-      {screen==="session"   && <SessionScreen   {...sProps}/>}
-      {screen==="done"      && <DoneScreen       session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/>}
-      {rotationSummary      && <RotationSummaryModal summary={rotationSummary} onContinue={handleRotationContinue}/>}
+      {screen==="home"        && <HomeScreen streak={streak} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length}/>}
+      {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} onStart={handleReadinessStart}/>}
+      {screen==="session"     && <SessionScreen   {...sProps}/>}
+      {screen==="done"        && <DoneScreen       session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/>}
+      {screen==="performance" && <PerformanceLab   history={history} onBack={()=>setScreen("home")}/>}
+      {rotationSummary        && <RotationSummaryModal summary={rotationSummary} onContinue={handleRotationContinue}/>}
     </div>
   );
 }
@@ -561,7 +569,7 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
 }
 
 // ─── Home ──────────────────────────────────────────────────────────────────────
-function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate}){
+function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -832,6 +840,31 @@ function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayD
           </div>
         </Fade>
       )}
+
+      {/* Performance Lab entry — always visible, becomes active once data exists */}
+      <Fade d={260}>
+        <div onClick={onPerformance}
+          style={{margin:"20px 24px 0",padding:"18px 20px",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",gap:12,transition:`all 200ms ${T.ease}`}}>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:4}}>
+              Performance lab
+            </div>
+            <div style={{fontFamily:T.serif,fontSize:19,fontWeight:300,color:T.text1,lineHeight:1.3,marginBottom:3}}>
+              {historyCount === 0
+                ? "Your progress, visualised"
+                : `${historyCount} session${historyCount===1?"":"s"} logged`}
+            </div>
+            <div style={{fontSize:12,color:T.text3,lineHeight:1.5,fontFamily:T.serif,fontStyle:"italic"}}>
+              {historyCount === 0
+                ? "Complete a session to light it up"
+                : "1RM trends · weekly volume · consistency"}
+            </div>
+          </div>
+          <div style={{flexShrink:0,width:40,height:40,borderRadius:"50%",background:historyCount > 0 ? `${T.gold}18` : T.bg3,border:`1px solid ${historyCount > 0 ? T.gold+"55" : T.bg4}`,display:"flex",alignItems:"center",justifyContent:"center",transition:`all 200ms ${T.ease}`}}>
+            <span style={{fontSize:16,color:historyCount > 0 ? T.gold : T.text3}}>→</span>
+          </div>
+        </div>
+      </Fade>
     </div>
   );
 }
