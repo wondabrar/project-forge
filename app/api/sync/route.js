@@ -1,6 +1,12 @@
 import { put, list, del } from "@vercel/blob";
 import { NextResponse } from "next/server";
 
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
+};
+
 // Blob layout (case-insensitive — path uses lowercase, display name lives in meta):
 //   forge/profiles/{lowerName}/meta.json    — weights, reps, streak, programmeBlock, displayName
 //   forge/profiles/{lowerName}/history.json — full session history (append-only)
@@ -9,6 +15,11 @@ const normalise   = (name) => String(name || "").trim().toLowerCase();
 const metaPath    = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/meta.json`;
 const historyPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/history.json`;
 const legacyPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}`;
+
+// OPTIONS preflight for CORS
+export async function OPTIONS() {
+  return NextResponse.json(null, { headers: corsHeaders });
+}
 
 // GET /api/sync?profile=Name
 // Returns { meta: {...}, history: [...] }
@@ -20,16 +31,16 @@ export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const profile = searchParams.get("profile");
   const check   = searchParams.get("check") === "1";
-  if (!profile) return NextResponse.json(null, { status: 400 });
+  if (!profile) return NextResponse.json(null, { status: 400, headers: corsHeaders });
 
   try {
     const { blobs } = await list({ prefix: legacyPrefix(profile) });
 
     if (check) {
-      return NextResponse.json({ exists: blobs.length > 0 });
+      return NextResponse.json({ exists: blobs.length > 0 }, { headers: corsHeaders });
     }
 
-    if (!blobs.length) return NextResponse.json(null, { status: 404 });
+    if (!blobs.length) return NextResponse.json(null, { status: 404, headers: corsHeaders });
 
     const findLatest = (pathMatch) => {
       const matches = blobs.filter(b => b.pathname === pathMatch || b.pathname.startsWith(`${pathMatch}-`));
@@ -57,9 +68,9 @@ export async function GET(request) {
       fetchJson(historyBlob),
     ]);
 
-    return NextResponse.json({ meta, history: history || [] });
+    return NextResponse.json({ meta, history: history || [] }, { headers: corsHeaders });
   } catch (e) {
-    return NextResponse.json(null, { status: 500 });
+    return NextResponse.json(null, { status: 500, headers: corsHeaders });
   }
 }
 
@@ -69,8 +80,8 @@ export async function GET(request) {
 export async function PUT(request) {
   try {
     const { profile, data } = await request.json();
-    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
-    if (!data)    return NextResponse.json({ error: "No data"    }, { status: 400 });
+    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400, headers: corsHeaders });
+    if (!data)    return NextResponse.json({ error: "No data"    }, { status: 400, headers: corsHeaders });
 
     const results = {};
 
@@ -120,9 +131,9 @@ export async function PUT(request) {
       results.history = { count: merged.length };
     }
 
-    return NextResponse.json({ ok: true, ...results });
+    return NextResponse.json({ ok: true, ...results }, { headers: corsHeaders });
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: e.message }, { status: 500, headers: corsHeaders });
   }
 }
 
@@ -134,11 +145,11 @@ export async function PUT(request) {
 export async function POST(request) {
   try {
     const { profile, displayName } = await request.json();
-    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
+    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400, headers: corsHeaders });
 
     const { blobs } = await list({ prefix: legacyPrefix(profile) });
     if (blobs.length > 0) {
-      return NextResponse.json({ error: "Name taken", exists: true }, { status: 409 });
+      return NextResponse.json({ error: "Name taken", exists: true }, { status: 409, headers: corsHeaders });
     }
 
     await put(
@@ -153,8 +164,8 @@ export async function POST(request) {
       { access: "public", contentType: "application/json", addRandomSuffix: true }
     );
 
-    return NextResponse.json({ ok: true, claimed: true });
+    return NextResponse.json({ ok: true, claimed: true }, { headers: corsHeaders });
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+    return NextResponse.json({ error: e.message }, { status: 500, headers: corsHeaders });
   }
 }
