@@ -10,6 +10,7 @@ import {
 import {
   LS, P, PB, H, bumpStreak,
   blobPull, blobPush, flushPendingPushes,
+  checkProfileExists, claimProfile,
   roundPlate, applyRpe, weeksSince, weekKey,
   newDraftLog, logSet, finaliseDraft, scaleForReadiness,
 } from "@/lib/storage";
@@ -215,10 +216,24 @@ export default function ForgeApp(){
     });
   },[activeProfile]);
 
-  const activateProfile=async(name)=>{
-    P.add(name); P.setActive(name);
-    setActiveProfileState(name);
+  const activateProfile = async (name, { claim = false } = {}) => {
+    const trimmed = String(name).trim();
+    if (!trimmed) return { ok: false, reason: "empty" };
+
+    // Claim path: first-time signup for a new name.
+    // The claim endpoint is atomic — if someone else grabbed the name
+    // between the availability check and now, we'll get 409 here.
+    if (claim) {
+      const result = await claimProfile(trimmed, trimmed);
+      if (result.taken) return { ok: false, reason: "taken" };
+      if (!result.ok)   return { ok: false, reason: "network" };
+    }
+
+    P.add(trimmed);
+    P.setActive(trimmed);
+    setActiveProfileState(trimmed);
     setShowProfiles(false);
+    return { ok: true };
   };
 
   // Scale session by readiness (cooked = 85% weight on mains, -1 set supersets, no finishers)
@@ -490,16 +505,80 @@ export default function ForgeApp(){
 function ProfileScreen({existing,current,onActivate,onCancel}){
   const [name,setName]=useState("");
   const [confirmWipe,setConfirmWipe]=useState(null);
+  // availability: "idle" | "checking" | "available" | "taken" | "network-err"
+  const [availability,setAvailability]=useState("idle");
+  const [submitting,setSubmitting]=useState(false);
+  const [submitError,setSubmitError]=useState(null);
+  const checkTimerRef = useRef(null);
+  const latestQueryRef = useRef("");
   const {strength:s}=T;
 
   const wipeProfile=(n)=>{
-    ["weights","reps","streak"].forEach(k=>localStorage.removeItem(`forge:${n}:${k}`));
+    ["weights","reps","streak","history"].forEach(k=>localStorage.removeItem(`forge:${n}:${k}`));
     const updated=P.list().filter(p=>p!==n);
     LS.set("forge:profiles",updated);
     if(P.getActive()===n){ LS.set("forge:active",null); }
     setConfirmWipe(null);
     window.location.reload();
   };
+
+  // Debounced availability check as user types
+  useEffect(() => {
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length < 2) {
+      setAvailability("idle");
+      clearTimeout(checkTimerRef.current);
+      return;
+    }
+    // If it's an existing local profile, it's "ours" — treat as available
+    if (existing.some(e => e.toLowerCase() === trimmed.toLowerCase())) {
+      setAvailability("available");
+      return;
+    }
+    setAvailability("checking");
+    clearTimeout(checkTimerRef.current);
+    latestQueryRef.current = trimmed;
+    checkTimerRef.current = setTimeout(async () => {
+      const res = await checkProfileExists(trimmed);
+      // Guard against stale responses — user may have typed more since
+      if (latestQueryRef.current !== trimmed) return;
+      if (res === null) setAvailability("network-err");
+      else if (res.exists) setAvailability("taken");
+      else setAvailability("available");
+    }, 400);
+    return () => clearTimeout(checkTimerRef.current);
+  }, [name, existing]);
+
+  const canSubmit = name.trim().length >= 2 && (availability === "available" || availability === "network-err") && !submitting;
+
+  const handleSubmit = async () => {
+    const trimmed = name.trim();
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    // If it's an existing local profile, just activate — don't try to claim again
+    const isLocalProfile = existing.some(e => e.toLowerCase() === trimmed.toLowerCase());
+    const result = await onActivate(trimmed, { claim: !isLocalProfile });
+    setSubmitting(false);
+    if (!result?.ok) {
+      if (result?.reason === "taken") {
+        setAvailability("taken");
+        setSubmitError("Someone just claimed that name. Try another.");
+      } else {
+        setSubmitError("Network hiccup. Try again?");
+      }
+    }
+  };
+
+  // Visual state for availability pip
+  const availabilityPip = () => {
+    if (availability === "checking")     return { colour: T.text3, icon: "…",  label: "checking" };
+    if (availability === "available")    return { colour: T.sage,  icon: "✓",  label: existing.some(e=>e.toLowerCase()===name.trim().toLowerCase()) ? "on this device" : "available" };
+    if (availability === "taken")        return { colour: T.rose,  icon: "✕",  label: "taken" };
+    if (availability === "network-err")  return { colour: T.gold,  icon: "?",  label: "offline — try anyway" };
+    return null;
+  };
+  const pip = availabilityPip();
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased",padding:"72px 24px 48px",position:"relative",overflow:"hidden"}}>
@@ -510,7 +589,7 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
           {current?"Switch profile":"Who's training?"}
         </div>
         <p style={{fontSize:14,color:T.text2,marginBottom:36,lineHeight:1.6}}>
-          {current?"Pick a profile or add someone new.":"Your name keeps your streak and weights separate from everyone else."}
+          {current?"Pick a profile or add someone new.":"Pick a name. It travels with you across devices."}
         </p>
       </Fade>
       {existing.length>0&&(
@@ -532,15 +611,59 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
         </Fade>
       )}
       <Fade d={120}>
-        <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:12}}>Add new</div>
-        <div style={{display:"flex",gap:10}}>
-          <input value={name} onChange={e=>setName(e.target.value)}
-            onKeyDown={e=>{if(e.key==="Enter"&&name.trim()) onActivate(name.trim());}}
-            placeholder="Your name"
-            style={{flex:1,background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.md,padding:"14px 16px",fontFamily:T.serif,fontSize:18,fontWeight:300,color:T.text1,outline:"none",caretColor:T.coral}}
-          />
-          <button onClick={()=>name.trim()&&onActivate(name.trim())}
-            style={{padding:"14px 20px",background:name.trim()?T.coral:T.bg3,border:"none",borderRadius:T.r.md,cursor:name.trim()?"pointer":"default",fontFamily:T.serif,fontSize:18,fontWeight:400,color:name.trim()?T.bg0:T.text4,transition:`all 200ms ${T.ease}`}}>→</button>
+        <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:12}}>
+          {existing.length > 0 ? "Add new" : "Pick your name"}
+        </div>
+        <div style={{position:"relative"}}>
+          <div style={{display:"flex",gap:10}}>
+            <div style={{flex:1,position:"relative"}}>
+              <input value={name} onChange={e=>{setName(e.target.value); setSubmitError(null);}}
+                onKeyDown={e=>{if(e.key==="Enter"&&canSubmit) handleSubmit();}}
+                placeholder="Your name"
+                autoComplete="off" autoCorrect="off" autoCapitalize="words" spellCheck="false"
+                style={{width:"100%",background:T.bg2,border:`1px solid ${availability==="taken"?T.rose+"55":availability==="available"?T.sage+"55":T.bg3}`,borderRadius:T.r.md,padding:"14px 48px 14px 16px",fontFamily:T.serif,fontSize:18,fontWeight:300,color:T.text1,outline:"none",caretColor:T.coral,transition:`border 180ms ${T.ease}`}}
+              />
+              {pip && (
+                <div style={{position:"absolute",right:14,top:"50%",transform:"translateY(-50%)",display:"flex",alignItems:"center",gap:6,pointerEvents:"none"}}>
+                  <span style={{fontSize:14,color:pip.colour,fontWeight:500}}>{pip.icon}</span>
+                </div>
+              )}
+            </div>
+            <button onClick={handleSubmit} disabled={!canSubmit}
+              style={{padding:"14px 20px",background:canSubmit?T.coral:T.bg3,border:"none",borderRadius:T.r.md,cursor:canSubmit?"pointer":"default",fontFamily:T.serif,fontSize:18,fontWeight:400,color:canSubmit?T.bg0:T.text4,transition:`all 200ms ${T.ease}`}}>
+              {submitting ? "…" : "→"}
+            </button>
+          </div>
+          {/* Subscript — availability status or helper text */}
+          <div style={{marginTop:10,minHeight:16,fontSize:11,fontFamily:T.sans,color:pip?.colour || T.text3,display:"flex",alignItems:"center",gap:6,transition:`color 180ms ${T.ease}`}}>
+            {submitError ? (
+              <span style={{color:T.rose}}>{submitError}</span>
+            ) : pip ? (
+              <span>{pip.label === "available" && "Available · this will be your username"}
+                    {pip.label === "on this device" && "Welcome back"}
+                    {pip.label === "taken" && "Already taken on Forge"}
+                    {pip.label === "checking" && "Checking…"}
+                    {pip.label === "offline — try anyway" && "Couldn't check online — you can still proceed"}
+              </span>
+            ) : (
+              <span style={{color:T.text4}}>2+ characters. Case doesn't matter.</span>
+            )}
+          </div>
+        </div>
+      </Fade>
+
+      {/* Tone-of-voice card — sets expectations on data + PII */}
+      <Fade d={180}>
+        <div style={{marginTop:36,padding:"18px 20px",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg}}>
+          <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:8}}>
+            No email. No phone.
+          </div>
+          <div style={{fontFamily:T.serif,fontSize:19,fontWeight:300,color:T.text1,lineHeight:1.35,marginBottom:6}}>
+            We don't want your <span style={{fontStyle:"italic",color:T.coral}}>starsign</span> either.
+          </div>
+          <p style={{fontSize:13,color:T.text3,lineHeight:1.6}}>
+            Forge keeps your data yours. A name is all we need — it syncs your streak and weights across your devices. Nothing more.
+          </p>
         </div>
       </Fade>
 
@@ -551,14 +674,14 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
               Wipe <span style={{color:T.rose,fontStyle:"italic"}}>{confirmWipe}</span>?
             </div>
             <p style={{fontSize:13,color:T.text2,marginBottom:28,lineHeight:1.6}}>
-              This will permanently delete all saved weights, reps, and the streak for this profile. It cannot be undone.
+              This removes the profile from this device only. Cloud data stays until you wipe from there too.
             </p>
             <div style={{display:"flex",gap:10}}>
               <button onClick={()=>setConfirmWipe(null)} style={{flex:1,padding:"16px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text2}}>
                 Cancel
               </button>
               <button onClick={()=>wipeProfile(confirmWipe)} style={{flex:1,padding:"16px",background:`${T.rose}22`,border:`1px solid ${T.rose}55`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:17,fontWeight:400,color:T.rose}}>
-                Wipe progress
+                Remove locally
               </button>
             </div>
           </div>
@@ -769,11 +892,12 @@ function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayD
                 margin:"16px 24px 0",padding:"16px 20px",
                 background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,
                 display:"flex",alignItems:"center",justifyContent:"space-between",
+                gap:12,
               }}>
                 <span style={{fontFamily:T.serif,fontSize:15,fontWeight:300,color:T.text3,fontStyle:"italic"}}>
-                  {dayLabel}'s session
+                  {diffDays > 0 ? "Upcoming" : "Past session"}
                 </span>
-                <Tag color={accent.main}>{dayLabel}</Tag>
+                <Tag color={accent.main}>{viewDate.toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"})}</Tag>
               </div>
             )}
           </Fade>
