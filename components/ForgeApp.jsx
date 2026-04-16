@@ -3,13 +3,15 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   WEEK, STRENGTH_DAY_SESSIONS, SESSIONS,
-  EXERCISE_POOLS, rotateAccessories,
+  EXERCISE_POOLS, rotateAccessories, rotationDiff,
+  ROTATION_OPTIONAL, ROTATION_AUTO, ROTATION_FORCED,
   DAY_CONFIG, DAY_NAMES, SWAP_DB, EQ_COLOUR,
 } from "@/lib/programme";
 import {
-  LS, P, PB, bumpStreak,
-  blobPull, blobPush,
+  LS, P, PB, H, bumpStreak,
+  blobPull, blobPush, flushPendingPushes,
   roundPlate, applyRpe, weeksSince, weekKey,
+  newDraftLog, logSet, finaliseDraft, scaleForReadiness,
 } from "@/lib/storage";
 
 // ─── Tokens ────────────────────────────────────────────────────────────────────
@@ -118,6 +120,10 @@ export default function ForgeApp(){
   const [restActive,setRestActive]=useState(false);
   const [restRemain,setRestRemain]=useState(180);
   const [restTrigger,setRestTrigger]=useState(null);
+  // Append-only session log built during an active session
+  const draftLogRef = useRef(null);
+  // Shown when auto-rotation fires — acknowledge before starting session
+  const [rotationSummary,setRotationSummary]=useState(null);
 
   // Seed on profile change + pull from blob
   useEffect(()=>{
@@ -126,26 +132,51 @@ export default function ForgeApp(){
     setWRState(P.getReps(activeProfile));
     setStreak(P.getStreak(activeProfile).count);
     setWeekDone(P.getWeekDone(activeProfile));
+
+    // Retry any failed pushes from previous sessions
+    flushPendingPushes((profile) => ({
+      meta: {
+        weights: P.getWeights(profile),
+        reps: P.getReps(profile),
+        streak: P.getStreak(profile),
+        programmeBlock: PB.get(),
+      },
+      history: H.get(profile),
+    }));
+
     blobPull(activeProfile).then(remote=>{
       if(!remote) return;
-      setWWState(prev=>{
-        const merged={...prev,...remote.weights};
-        P.saveWeights(activeProfile,merged);
-        return merged;
-      });
-      setWRState(prev=>{
-        const merged={...prev,...remote.reps};
-        P.saveReps(activeProfile,merged);
-        return merged;
-      });
-      if(remote.streak?.count>P.getStreak(activeProfile).count){
-        P.saveStreak(activeProfile,remote.streak);
-        setStreak(remote.streak.count);
+      const meta = remote.meta || {};
+      const remoteHistory = remote.history || [];
+
+      // Merge meta (flat maps — last-write-wins is semantically correct)
+      if (meta.weights) {
+        setWWState(prev=>{
+          const merged={...prev,...meta.weights};
+          P.saveWeights(activeProfile,merged);
+          return merged;
+        });
       }
-      // Merge rotation state — take whichever device is further ahead
-      if(remote.programmeBlock?.number>PB.get().number){
-        PB.save(remote.programmeBlock);
-        setProgrammeBlock(remote.programmeBlock);
+      if (meta.reps) {
+        setWRState(prev=>{
+          const merged={...prev,...meta.reps};
+          P.saveReps(activeProfile,merged);
+          return merged;
+        });
+      }
+      if (meta.streak?.count > P.getStreak(activeProfile).count){
+        P.saveStreak(activeProfile, meta.streak);
+        setStreak(meta.streak.count);
+      }
+      if (meta.programmeBlock?.number > PB.get().number){
+        PB.save(meta.programmeBlock);
+        setProgrammeBlock(meta.programmeBlock);
+      }
+
+      // Merge history (append-only — dedupe by id, sort by id)
+      if (remoteHistory.length) {
+        const merged = H.merge(H.get(activeProfile), remoteHistory);
+        H.save(activeProfile, merged);
       }
     });
   },[activeProfile]);
@@ -185,7 +216,12 @@ export default function ForgeApp(){
     setShowProfiles(false);
   };
 
-  const activeSession = SESSIONS[activeSessionIdx];
+  // Scale session by readiness (cooked = 85% weight on mains, -1 set supersets, no finishers)
+  const rawSession = SESSIONS[activeSessionIdx];
+  const activeSession = useMemo(
+    () => scaleForReadiness(rawSession, readiness),
+    [rawSession, readiness]
+  );
   const block    = activeSession.blocks[blockIdx];
   const isSS     = block.type==="superset"||block.type==="finisher";
   const swapKey  = isSS ? `${block.id}-${phase}` : block.id;
@@ -211,11 +247,49 @@ export default function ForgeApp(){
     setSessionSwaps(prev=>({...prev,[key]:newEx}));
   },[]);
 
+  // Append one set to the draft log. Tolerant of missing draft (mid-session recovery).
+  // Phase is derived from the exercise identity — critical for supersets where
+  // commitLog fires after phase has already moved, and we need both A and B
+  // logged against the correct slot keys.
+  const pushSetToDraft = useCallback((ex, rpe) => {
+    if (!draftLogRef.current || !ex) return;
+    let key = block.id;
+    if (isSS) {
+      // Match the exercise against the resolved A/B to determine its slot
+      const resolvedA = resolveExFn(block.id, "A", block.exA);
+      const resolvedB = resolveExFn(block.id, "B", block.exB);
+      const derivedPhase = ex.name === resolvedA?.name ? "A"
+                         : ex.name === resolvedB?.name ? "B"
+                         : phase; // fallback for edge cases
+      key = `${block.id}-${derivedPhase}`;
+    }
+    const swapPick = sessionSwaps[key];
+    const swapped  = !!swapPick;
+    const fromPool = EXERCISE_POOLS[key] ? key : null;
+    logSet(draftLogRef.current, {
+      blockId: block.id,
+      blockType: block.type,
+      exerciseName: ex.name,
+      muscle: ex.muscle,
+      swapped,
+      fromPool,
+      weight: workingWeights[ex.name] ?? ex.weight,
+      reps: workingReps[ex.name] ?? ex.reps,
+      rpe: rpe || null,
+    });
+  }, [block, isSS, phase, sessionSwaps, workingWeights, workingReps, resolveExFn]);
+
   const commitLog=useCallback((rpe)=>{
     // Use resolved exercises so RPE weight adjustments target the correct name
     const exes = isSS
       ? [resolveExFn(block.id,"A",block.exA), resolveExFn(block.id,"B",block.exB)]
       : [resolveExFn(block.id, null, block.ex)];
+
+    // 1. Record the actual sets performed in the draft log BEFORE applying RPE
+    //    so history captures the weight used, not the weight suggested next time.
+    exes.forEach(ex => pushSetToDraft(ex, rpe));
+
+    // 2. Apply RPE-driven weight adjustments for next session's working weight
     const updates={};
     exes.forEach(ex=>{
       if(!ex) return;
@@ -223,6 +297,8 @@ export default function ForgeApp(){
       if(w!==null&&w!==undefined){const n=applyRpe(w,rpe);if(n!==w) updates[ex.name]=n;}
     });
     if(Object.keys(updates).length) setWW(p=>({...p,...updates}));
+
+    // 3. Advance block / set / screen
     if(setNum>=block.sets){
       if(blockIdx<activeSession.blocks.length-1){setBlockIdx(p=>p+1);setSetNum(1);setPhase("A");}
       else setScreen("done");
@@ -230,13 +306,22 @@ export default function ForgeApp(){
     setRestTrigger({id:Date.now(),duration:block.rest});
     setSsRoundDone(false);
     setAwaitRpe(false);
-  },[block,blockIdx,isSS,setNum,workingWeights,setWW,activeSession,resolveExFn]);
+  },[block,blockIdx,isSS,setNum,workingWeights,setWW,activeSession,resolveExFn,pushSetToDraft]);
 
   const handleLog=useCallback(()=>{
     if(isSS){
-      if(phase==="A"){setPhase("B");return;}
+      if(phase==="A"){
+        // Log exercise A as we move into B. Only for finishers — supersets
+        // will log both A and B together in commitLog when RPE is submitted.
+        if(block.type==="finisher"){
+          pushSetToDraft(resolveExFn(block.id,"A",block.exA), null);
+        }
+        setPhase("B");return;
+      }
       setPhase("A");
       if(block.type==="superset"){setSsRoundDone(true);return;}
+      // Finisher: log B, then advance silently without RPE
+      pushSetToDraft(resolveExFn(block.id,"B",block.exB), null);
       if(setNum>=block.sets){
         if(blockIdx<activeSession.blocks.length-1){setBlockIdx(p=>p+1);setSetNum(1);setPhase("A");}
         else setScreen("done");
@@ -245,13 +330,14 @@ export default function ForgeApp(){
       return;
     }
     setAwaitRpe(true);
-  },[block,blockIdx,isSS,phase,setNum]);
+  },[block,blockIdx,isSS,phase,setNum,activeSession,resolveExFn,pushSetToDraft]);
 
   const reset=()=>{
     setBlockIdx(0);setSetNum(1);setPhase("A");setReadiness(null);
     setAwaitRpe(false);setSsRoundDone(false);
     setRestActive(false);setRestRemain(180);setRestTrigger(null);
     setSessionSwaps({});
+    draftLogRef.current = null;
     setScreen("home");
   };
 
@@ -264,11 +350,26 @@ export default function ForgeApp(){
       const wm=[6,0,1,2,3,4,5];
       const updated=P.markDayDone(activeProfile,wm[dw]);
       setWeekDone(updated);
-      blobPush(activeProfile,{
-        weights:workingWeights,
-        reps:workingReps,
-        streak:P.getStreak(activeProfile),
-        programmeBlock,
+
+      // Finalise the session draft and append to history
+      let sessionRecord = null;
+      if (draftLogRef.current) {
+        sessionRecord = finaliseDraft(draftLogRef.current);
+        H.append(activeProfile, sessionRecord);
+        draftLogRef.current = null;
+      }
+
+      // Push both meta and the just-finalised record to blob.
+      // History push is incremental — only this one record, the server
+      // merges with whatever it has.
+      blobPush(activeProfile, {
+        meta: {
+          weights: workingWeights,
+          reps: workingReps,
+          streak: P.getStreak(activeProfile),
+          programmeBlock,
+        },
+        history: sessionRecord ? [sessionRecord] : [],
       });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -310,18 +411,58 @@ export default function ForgeApp(){
   const todayIdx = weekMap[dow];
   const todaySessionIdx = STRENGTH_DAY_SESSIONS[todayIdx] ?? 0;
 
+  // Actually rotate. Returns the new block so we can compute the diff.
+  const rotate = (showSummary = false) => {
+    const oldConfig = programmeBlock.config;
+    const history = {};
+    Object.entries(oldConfig).forEach(([k,ex])=>{ history[k]=ex.name; });
+    const newConfig = rotateAccessories(history);
+    const next = {
+      number: programmeBlock.number + 1,
+      startDate: new Date().toISOString().slice(0,10),
+      config: newConfig,
+      history,
+    };
+    setProgrammeBlock(next);
+    PB.save(next);
+    if (showSummary) {
+      const changes = rotationDiff(oldConfig, newConfig);
+      setRotationSummary({ blockNumber: next.number, changes });
+    }
+    return next;
+  };
+
+  const handleRotate = () => rotate(true);
+
   const beginSession = () => {
+    // Auto-rotate if we're past the threshold. Show summary card;
+    // once acknowledged, readiness screen follows.
+    const weeks = weeksSince(programmeBlock.startDate);
+    if (weeks >= ROTATION_AUTO) {
+      rotate(true);
+      // The summary modal's continue button transitions to readiness
+      setActiveSessionIdx(todaySessionIdx);
+      return;
+    }
     setActiveSessionIdx(todaySessionIdx);
     setScreen("readiness");
   };
 
-  const handleRotate = () => {
-    const history = {};
-    Object.entries(programmeBlock.config).forEach(([k,ex])=>{ history[k]=ex.name; });
-    const newConfig = rotateAccessories(history);
-    const next = { number: programmeBlock.number+1, startDate: new Date().toISOString().slice(0,10), config: newConfig, history };
-    setProgrammeBlock(next);
-    PB.save(next);
+  // After rotation summary acknowledged, advance to readiness
+  const handleRotationContinue = () => {
+    setRotationSummary(null);
+    setScreen("readiness");
+  };
+
+  // Readiness screen's "start" initialises the draft log and enters session
+  const handleReadinessStart = () => {
+    draftLogRef.current = newDraftLog({
+      profileName: activeProfile,
+      session: ["strength-a","strength-b","strength-c"][activeSessionIdx],
+      blockNumber: programmeBlock.number,
+      readiness,
+    });
+    setScreen("session");
   };
 
   const weeksOnBlock = weeksSince(programmeBlock.startDate);
@@ -329,9 +470,10 @@ export default function ForgeApp(){
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
       {screen==="home"      && <HomeScreen streak={streak} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate}/>}
-      {screen==="readiness" && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} onStart={()=>setScreen("session")}/>}
+      {screen==="readiness" && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} onStart={handleReadinessStart}/>}
       {screen==="session"   && <SessionScreen   {...sProps}/>}
       {screen==="done"      && <DoneScreen       session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/>}
+      {rotationSummary      && <RotationSummaryModal summary={rotationSummary} onContinue={handleRotationContinue}/>}
     </div>
   );
 }
@@ -697,9 +839,9 @@ function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayD
 // ─── Readiness ─────────────────────────────────────────────────────────────────
 function ReadinessScreen({readiness,setReadiness,onStart}){
   const opts=[
-    {id:"fresh",icon:"○",label:"Fresh",sub:"Full programme.",   color:T.sage},
-    {id:"normal",icon:"◐",label:"Normal",sub:"Standard session.",color:T.gold},
-    {id:"cooked",icon:"●",label:"Cooked",sub:"60% volume.",     color:T.rose},
+    {id:"fresh", icon:"○",label:"Fresh", sub:"Full programme. Push today.",       color:T.sage},
+    {id:"normal",icon:"◐",label:"Normal",sub:"Standard session.",                  color:T.gold},
+    {id:"cooked",icon:"●",label:"Cooked",sub:"Deload weights · trimmed volume.",   color:T.rose},
   ];
   return (
     <div style={{minHeight:"100vh",padding:"72px 24px 0"}}>
@@ -986,6 +1128,48 @@ function SwapOverlay({activeEx,swapKey,onSwap,onClose}){
           ))}
         </div>
         <div style={{marginTop:16,fontSize:11,color:T.text4,fontStyle:"italic",fontFamily:T.serif,textAlign:"center"}}>Tap an exercise to swap for this set</div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Rotation Summary Modal ───────────────────────────────────────────────────
+// Shown when auto-rotation fires. Non-dismissible — you acknowledge, you continue.
+function RotationSummaryModal({summary,onContinue}){
+  const {gold}=T;
+  const count = summary.changes.length;
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.94)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px 32px",width:"100%",maxWidth:430,borderTop:`1px solid ${gold}44`,animation:`slideUp 280ms ${T.ease}`,maxHeight:"85vh",display:"flex",flexDirection:"column"}}>
+        <div style={{fontSize:10,fontWeight:500,color:gold,letterSpacing:"0.14em",textTransform:"uppercase",marginBottom:8}}>
+          New block · {summary.blockNumber}
+        </div>
+        <div style={{fontFamily:T.serif,fontSize:30,fontWeight:300,lineHeight:1.15,marginBottom:8}}>
+          Your programme<br/><span style={{color:gold,fontStyle:"italic"}}>has rotated.</span>
+        </div>
+        <p style={{fontSize:13,color:T.text2,marginBottom:20,lineHeight:1.6}}>
+          {count} {count===1?"accessory":"accessories"} swapped to keep the stimulus fresh. Main lifts stay the same — progressive overload continues.
+        </p>
+        <div style={{flex:1,overflowY:"auto",marginBottom:20,marginRight:-8,paddingRight:8}}>
+          {count===0 && (
+            <div style={{padding:"20px 0",fontSize:13,color:T.text3,fontStyle:"italic",fontFamily:T.serif,textAlign:"center"}}>
+              Rotation ran — same picks held. Rare but possible.
+            </div>
+          )}
+          {summary.changes.map((c,i)=>(
+            <div key={i} style={{padding:"12px 0",borderBottom:i<count-1?`1px solid ${T.bg3}`:"none"}}>
+              <div style={{fontSize:10,fontWeight:500,color:T.text4,letterSpacing:"0.08em",textTransform:"uppercase",marginBottom:4}}>{c.slot}</div>
+              <div style={{display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+                <span style={{fontFamily:T.serif,fontSize:14,fontWeight:300,color:T.text3,textDecoration:"line-through",textDecorationColor:T.text4}}>{c.from}</span>
+                <span style={{fontSize:12,color:gold}}>→</span>
+                <span style={{fontFamily:T.serif,fontSize:15,fontWeight:400,color:T.text1}}>{c.to}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        <button onClick={onContinue} style={{width:"100%",padding:"16px 24px",background:gold,border:"none",borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:19,fontWeight:400,color:T.bg0,boxShadow:`0 12px 36px ${gold}33`}}>
+          Continue to readiness →
+        </button>
       </div>
     </div>
   );
