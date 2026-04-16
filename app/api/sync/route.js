@@ -1,36 +1,42 @@
 import { put, list, del } from "@vercel/blob";
 import { NextResponse } from "next/server";
 
-// Blob layout (stable paths — no random suffixes for canonical records):
-//   forge/profiles/{name}/meta.json    — weights, reps, streak, programmeBlock
-//   forge/profiles/{name}/history.json — full session history (append-only)
-//
-// Legacy path:
-//   forge/profiles/{name}.json  (with random suffix) — migrated on first GET
+// Blob layout (case-insensitive — path uses lowercase, display name lives in meta):
+//   forge/profiles/{lowerName}/meta.json    — weights, reps, streak, programmeBlock, displayName
+//   forge/profiles/{lowerName}/history.json — full session history (append-only)
 
-const metaPath    = (name) => `forge/profiles/${encodeURIComponent(name)}/meta.json`;
-const historyPath = (name) => `forge/profiles/${encodeURIComponent(name)}/history.json`;
-const legacyPrefix = (name) => `forge/profiles/${encodeURIComponent(name)}`;
+const normalise   = (name) => String(name || "").trim().toLowerCase();
+const metaPath    = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/meta.json`;
+const historyPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/history.json`;
+const legacyPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}`;
 
 // GET /api/sync?profile=Name
 // Returns { meta: {...}, history: [...] }
+//
+// GET /api/sync?profile=Name&check=1
+// Returns { exists: boolean } — lightweight availability check for signup.
+// Case-insensitive: "Sarah", "sarah", "SARAH" all resolve the same way.
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const profile = searchParams.get("profile");
+  const check   = searchParams.get("check") === "1";
   if (!profile) return NextResponse.json(null, { status: 400 });
 
   try {
     const { blobs } = await list({ prefix: legacyPrefix(profile) });
+
+    if (check) {
+      return NextResponse.json({ exists: blobs.length > 0 });
+    }
+
     if (!blobs.length) return NextResponse.json(null, { status: 404 });
 
-    // Find latest canonical blobs for meta + history
     const findLatest = (pathMatch) => {
       const matches = blobs.filter(b => b.pathname === pathMatch || b.pathname.startsWith(`${pathMatch}-`));
       if (!matches.length) return null;
       return matches.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
     };
 
-    // Prefer stable paths; fall back to any older blob for this profile for migration
     const metaBlob    = findLatest(metaPath(profile))
                      || blobs.filter(b => !b.pathname.includes("/history"))
                              .sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0]
@@ -59,23 +65,20 @@ export async function GET(request) {
 
 // PUT /api/sync
 // Body: { profile: string, data: { meta?: object, history?: array } }
-// Writes whichever keys are present. History merged with remote by id.
+// Profile is case-insensitive. Display name should be passed inside meta.displayName.
 export async function PUT(request) {
   try {
     const { profile, data } = await request.json();
     if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
-    if (!data) return NextResponse.json({ error: "No data" }, { status: 400 });
+    if (!data)    return NextResponse.json({ error: "No data"    }, { status: 400 });
 
     const results = {};
 
-    // ── Meta write ────────────────────────────────────────────────────────
     if (data.meta) {
-      // Remove any prior meta blobs for this profile to avoid accumulation
-      // (random suffixes from legacy writes + any prior stable-path writes)
       const { blobs } = await list({ prefix: legacyPrefix(profile) });
       const obsolete = blobs.filter(b =>
-        b.pathname === `forge/profiles/${encodeURIComponent(profile)}.json` ||  // legacy
-        b.pathname.startsWith(`forge/profiles/${encodeURIComponent(profile)}.json`) ||
+        b.pathname === `forge/profiles/${encodeURIComponent(normalise(profile))}.json` ||
+        b.pathname.startsWith(`forge/profiles/${encodeURIComponent(normalise(profile))}.json`) ||
         b.pathname === metaPath(profile) ||
         b.pathname.startsWith(`${metaPath(profile)}-`)
       );
@@ -90,9 +93,7 @@ export async function PUT(request) {
       results.meta = true;
     }
 
-    // ── History write (merge with existing) ──────────────────────────────
     if (Array.isArray(data.history)) {
-      // Pull existing history and merge by id
       const { blobs } = await list({ prefix: historyPath(profile) });
       let existing = [];
       const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
@@ -108,7 +109,6 @@ export async function PUT(request) {
       });
       const merged = Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id));
 
-      // Delete prior history blobs for this profile
       if (blobs.length) {
         try { await del(blobs.map(b => b.url)); } catch {}
       }
@@ -121,6 +121,39 @@ export async function PUT(request) {
     }
 
     return NextResponse.json({ ok: true, ...results });
+  } catch (e) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
+}
+
+// POST /api/sync — name claim endpoint.
+// Reserves a name with a minimal meta blob so subsequent existence checks resolve.
+// Called immediately on profile creation so concurrent devices see the claim.
+// Body: { profile: string, displayName: string }
+// Returns 409 if the name is already taken.
+export async function POST(request) {
+  try {
+    const { profile, displayName } = await request.json();
+    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
+
+    const { blobs } = await list({ prefix: legacyPrefix(profile) });
+    if (blobs.length > 0) {
+      return NextResponse.json({ error: "Name taken", exists: true }, { status: 409 });
+    }
+
+    await put(
+      metaPath(profile),
+      JSON.stringify({
+        displayName: displayName || profile,
+        claimedAt: new Date().toISOString(),
+        weights: {},
+        reps: {},
+        streak: { count: 0, lastDate: null },
+      }),
+      { access: "public", contentType: "application/json", addRandomSuffix: true }
+    );
+
+    return NextResponse.json({ ok: true, claimed: true });
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
