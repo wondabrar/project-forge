@@ -1,4 +1,4 @@
-import { put, list, del } from "@vercel/blob";
+import { put, list, del, get } from "@vercel/blob";
 import { NextResponse } from "next/server";
 
 // Blob layout (case-insensitive — path uses lowercase, display name lives in meta):
@@ -6,26 +6,37 @@ import { NextResponse } from "next/server";
 //   forge/profiles/{lowerName}/history.json — full session history (append-only)
 //
 // Store access: PRIVATE.
-// Writes use put({ access:"private" }) — the SDK handles auth via BLOB_READ_WRITE_TOKEN.
-// Reads fetch blob.url directly with a Bearer token header, per Vercel docs:
-//   https://vercel.com/docs/vercel-blob/private-storage
+// Requires @vercel/blob@^2 (adds private-store support + get() for auth'd reads).
 
 const normalise    = (name) => String(name || "").trim().toLowerCase();
 const metaPath     = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/meta.json`;
 const historyPath  = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/history.json`;
 const legacyPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}`;
 
-// Read a private blob's JSON body using the read-write token.
-async function readJson(blobUrl) {
+// Read a private blob's JSON body via the SDK's authenticated get().
+// Returns null on not-found / parse error / any other failure.
+async function readJson(pathname) {
   try {
-    const token = process.env.BLOB_READ_WRITE_TOKEN;
-    if (!token) return null;
-    const res = await fetch(blobUrl, {
-      headers: { Authorization: `Bearer ${token}` },
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    return await res.json();
+    const result = await get(pathname, { access: "private" });
+    if (!result || result.statusCode !== 200 || !result.stream) return null;
+    // Consume the ReadableStream into a string
+    const reader = result.stream.getReader();
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    const buffer = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      buffer.set(chunk, offset);
+      offset += chunk.length;
+    }
+    const text = new TextDecoder().decode(buffer);
+    return JSON.parse(text);
   } catch {
     return null;
   }
@@ -52,7 +63,6 @@ export async function GET(request) {
 
     if (!blobs.length) return NextResponse.json(null, { status: 404 });
 
-    // Find latest canonical blob for each path (stable path + random suffix pattern)
     const findLatest = (pathMatch) => {
       const matches = blobs.filter(b => b.pathname === pathMatch || b.pathname.startsWith(`${pathMatch}-`));
       if (!matches.length) return null;
@@ -63,8 +73,8 @@ export async function GET(request) {
     const historyBlob = findLatest(historyPath(profile));
 
     const [meta, history] = await Promise.all([
-      metaBlob    ? readJson(metaBlob.url)    : Promise.resolve(null),
-      historyBlob ? readJson(historyBlob.url) : Promise.resolve(null),
+      metaBlob    ? readJson(metaBlob.pathname)    : Promise.resolve(null),
+      historyBlob ? readJson(historyBlob.pathname) : Promise.resolve(null),
     ]);
 
     return NextResponse.json({ meta, history: Array.isArray(history) ? history : [] });
@@ -84,7 +94,9 @@ export async function PUT(request) {
 
     const results = {};
 
+    // ── Meta write ──────────────────────────────────────────────
     if (data.meta) {
+      // Clear prior meta blobs (they have random suffixes, so no natural overwrite)
       const { blobs } = await list({ prefix: legacyPrefix(profile) });
       const obsolete = blobs.filter(b =>
         b.pathname === metaPath(profile) ||
@@ -101,14 +113,14 @@ export async function PUT(request) {
       results.meta = true;
     }
 
+    // ── History write (merge with remote) ───────────────────────
     if (Array.isArray(data.history)) {
       const { blobs } = await list({ prefix: historyPath(profile) });
 
-      // Pull existing history to merge with incoming
       let existing = [];
       const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
       if (latest) {
-        const pulled = await readJson(latest.url);
+        const pulled = await readJson(latest.pathname);
         if (Array.isArray(pulled)) existing = pulled;
       }
 
