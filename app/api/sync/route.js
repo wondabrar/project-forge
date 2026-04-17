@@ -1,24 +1,34 @@
 import { put, list, del } from "@vercel/blob";
 import { NextResponse } from "next/server";
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
-};
-
 // Blob layout (case-insensitive — path uses lowercase, display name lives in meta):
 //   forge/profiles/{lowerName}/meta.json    — weights, reps, streak, programmeBlock, displayName
 //   forge/profiles/{lowerName}/history.json — full session history (append-only)
+//
+// Store access: PRIVATE.
+// Writes use put({ access:"private" }) — the SDK handles auth via BLOB_READ_WRITE_TOKEN.
+// Reads fetch blob.url directly with a Bearer token header, per Vercel docs:
+//   https://vercel.com/docs/vercel-blob/private-storage
 
-const normalise   = (name) => String(name || "").trim().toLowerCase();
-const metaPath    = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/meta.json`;
-const historyPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/history.json`;
+const normalise    = (name) => String(name || "").trim().toLowerCase();
+const metaPath     = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/meta.json`;
+const historyPath  = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/history.json`;
 const legacyPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}`;
 
-// OPTIONS preflight for CORS
-export async function OPTIONS() {
-  return NextResponse.json(null, { headers: corsHeaders });
+// Read a private blob's JSON body using the read-write token.
+async function readJson(blobUrl) {
+  try {
+    const token = process.env.BLOB_READ_WRITE_TOKEN;
+    if (!token) return null;
+    const res = await fetch(blobUrl, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
 // GET /api/sync?profile=Name
@@ -31,46 +41,35 @@ export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const profile = searchParams.get("profile");
   const check   = searchParams.get("check") === "1";
-  if (!profile) return NextResponse.json(null, { status: 400, headers: corsHeaders });
+  if (!profile) return NextResponse.json(null, { status: 400 });
 
   try {
     const { blobs } = await list({ prefix: legacyPrefix(profile) });
 
     if (check) {
-      return NextResponse.json({ exists: blobs.length > 0 }, { headers: corsHeaders });
+      return NextResponse.json({ exists: blobs.length > 0 });
     }
 
-    if (!blobs.length) return NextResponse.json(null, { status: 404, headers: corsHeaders });
+    if (!blobs.length) return NextResponse.json(null, { status: 404 });
 
+    // Find latest canonical blob for each path (stable path + random suffix pattern)
     const findLatest = (pathMatch) => {
       const matches = blobs.filter(b => b.pathname === pathMatch || b.pathname.startsWith(`${pathMatch}-`));
       if (!matches.length) return null;
       return matches.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
     };
 
-    const metaBlob    = findLatest(metaPath(profile))
-                     || blobs.filter(b => !b.pathname.includes("/history"))
-                             .sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0]
-                     || null;
+    const metaBlob    = findLatest(metaPath(profile));
     const historyBlob = findLatest(historyPath(profile));
 
-    const fetchJson = async (b) => {
-      if (!b) return null;
-      try {
-        const r = await fetch(b.url);
-        if (!r.ok) return null;
-        return await r.json();
-      } catch { return null; }
-    };
-
     const [meta, history] = await Promise.all([
-      fetchJson(metaBlob),
-      fetchJson(historyBlob),
+      metaBlob    ? readJson(metaBlob.url)    : Promise.resolve(null),
+      historyBlob ? readJson(historyBlob.url) : Promise.resolve(null),
     ]);
 
-    return NextResponse.json({ meta, history: history || [] }, { headers: corsHeaders });
+    return NextResponse.json({ meta, history: Array.isArray(history) ? history : [] });
   } catch (e) {
-    return NextResponse.json(null, { status: 500, headers: corsHeaders });
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
 
@@ -80,16 +79,14 @@ export async function GET(request) {
 export async function PUT(request) {
   try {
     const { profile, data } = await request.json();
-    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400, headers: corsHeaders });
-    if (!data)    return NextResponse.json({ error: "No data"    }, { status: 400, headers: corsHeaders });
+    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
+    if (!data)    return NextResponse.json({ error: "No data"    }, { status: 400 });
 
     const results = {};
 
     if (data.meta) {
       const { blobs } = await list({ prefix: legacyPrefix(profile) });
       const obsolete = blobs.filter(b =>
-        b.pathname === `forge/profiles/${encodeURIComponent(normalise(profile))}.json` ||
-        b.pathname.startsWith(`forge/profiles/${encodeURIComponent(normalise(profile))}.json`) ||
         b.pathname === metaPath(profile) ||
         b.pathname.startsWith(`${metaPath(profile)}-`)
       );
@@ -99,23 +96,24 @@ export async function PUT(request) {
       await put(
         metaPath(profile),
         JSON.stringify({ ...data.meta, syncedAt: new Date().toISOString() }),
-        { access: "public", contentType: "application/json", addRandomSuffix: true }
+        { access: "private", contentType: "application/json", addRandomSuffix: true }
       );
       results.meta = true;
     }
 
     if (Array.isArray(data.history)) {
       const { blobs } = await list({ prefix: historyPath(profile) });
+
+      // Pull existing history to merge with incoming
       let existing = [];
       const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
       if (latest) {
-        try {
-          const r = await fetch(latest.url);
-          if (r.ok) existing = await r.json();
-        } catch {}
+        const pulled = await readJson(latest.url);
+        if (Array.isArray(pulled)) existing = pulled;
       }
+
       const byId = new Map();
-      [...(Array.isArray(existing) ? existing : []), ...data.history].forEach(rec => {
+      [...existing, ...data.history].forEach(rec => {
         if (rec && rec.id) byId.set(rec.id, rec);
       });
       const merged = Array.from(byId.values()).sort((a, b) => a.id.localeCompare(b.id));
@@ -126,14 +124,14 @@ export async function PUT(request) {
       await put(
         historyPath(profile),
         JSON.stringify(merged),
-        { access: "public", contentType: "application/json", addRandomSuffix: true }
+        { access: "private", contentType: "application/json", addRandomSuffix: true }
       );
       results.history = { count: merged.length };
     }
 
-    return NextResponse.json({ ok: true, ...results }, { headers: corsHeaders });
+    return NextResponse.json({ ok: true, ...results });
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500, headers: corsHeaders });
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
 
@@ -145,11 +143,11 @@ export async function PUT(request) {
 export async function POST(request) {
   try {
     const { profile, displayName } = await request.json();
-    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400, headers: corsHeaders });
+    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
 
     const { blobs } = await list({ prefix: legacyPrefix(profile) });
     if (blobs.length > 0) {
-      return NextResponse.json({ error: "Name taken", exists: true }, { status: 409, headers: corsHeaders });
+      return NextResponse.json({ error: "Name taken", exists: true }, { status: 409 });
     }
 
     await put(
@@ -161,11 +159,11 @@ export async function POST(request) {
         reps: {},
         streak: { count: 0, lastDate: null },
       }),
-      { access: "public", contentType: "application/json", addRandomSuffix: true }
+      { access: "private", contentType: "application/json", addRandomSuffix: true }
     );
 
-    return NextResponse.json({ ok: true, claimed: true }, { headers: corsHeaders });
+    return NextResponse.json({ ok: true, claimed: true });
   } catch (e) {
-    return NextResponse.json({ error: e.message }, { status: 500, headers: corsHeaders });
+    return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
