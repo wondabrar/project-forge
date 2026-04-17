@@ -11,7 +11,7 @@ import {
   LS, P, PB, H, bumpStreak,
   computeRhythm, detectRecoveryPattern,
   blobPull, blobPush, flushPendingPushes,
-  checkProfileExists, claimProfile,
+  checkProfileExists, claimProfile, blobDelete,
   roundPlate, applyRpe, weeksSince, weekKey,
   newDraftLog, logSet, finaliseDraft, scaleForReadiness,
 } from "@/lib/storage";
@@ -572,11 +572,27 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
   const latestQueryRef = useRef("");
   const {strength:s}=T;
 
-  const wipeProfile=(n)=>{
-    ["weights","reps","streak","history"].forEach(k=>localStorage.removeItem(`forge:${n}:${k}`));
+  // Expanded wipe: opts.cloud === true also nukes cloud data via DELETE /api/sync.
+  // opts.cloud === false only clears local storage (fast, offline-safe).
+  const [wipeBusy,setWipeBusy]=useState(false);
+  const [wipeError,setWipeError]=useState(null);
+  const wipeProfile=async (n,{cloud=false}={})=>{
+    setWipeError(null);
+    setWipeBusy(true);
+    if (cloud) {
+      const result = await blobDelete(n);
+      if (!result.ok) {
+        setWipeBusy(false);
+        setWipeError(result.error || "Couldn't reach the cloud. Try again?");
+        return;
+      }
+    }
+    // Local cleanup always runs regardless of cloud branch
+    ["weights","reps","streak","history","pendingPushes"].forEach(k=>localStorage.removeItem(`forge:${n}:${k}`));
     const updated=P.list().filter(p=>p!==n);
     LS.set("forge:profiles",updated);
     if(P.getActive()===n){ LS.set("forge:active",null); }
+    setWipeBusy(false);
     setConfirmWipe(null);
     window.location.reload();
   };
@@ -742,22 +758,53 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
       </Fade>
 
       {confirmWipe&&(
-        <div onClick={()=>setConfirmWipe(null)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-          <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px 40px",width:"100%",maxWidth:430,borderTop:`1px solid ${T.rose}33`,animation:`slideUp 240ms ${T.ease}`}}>
+        <div onClick={()=>!wipeBusy&&setConfirmWipe(null)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.rose}33`,animation:`slideUp 240ms ${T.ease}`,maxHeight:"92vh",overflowY:"auto",boxSizing:"border-box"}}>
             <div style={{fontFamily:T.serif,fontSize:24,fontWeight:300,lineHeight:1.2,marginBottom:8}}>
               Wipe <span style={{color:T.rose,fontStyle:"italic"}}>{confirmWipe}</span>?
             </div>
-            <p style={{fontSize:13,color:T.text2,marginBottom:28,lineHeight:1.6}}>
-              This removes the profile from this device only. Cloud data stays until you wipe from there too.
+            <p style={{fontSize:13,color:T.text2,marginBottom:24,lineHeight:1.6}}>
+              Choose how far this goes. Local keeps your data in the cloud — you can reclaim the name by typing it again. Full wipe releases the name and deletes everything.
             </p>
-            <div style={{display:"flex",gap:10}}>
-              <button onClick={()=>setConfirmWipe(null)} style={{flex:1,padding:"16px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text2}}>
-                Cancel
+
+            {wipeError && (
+              <div style={{padding:"10px 14px",marginBottom:16,borderRadius:T.r.md,background:`${T.rose}14`,border:`1px solid ${T.rose}44`,fontSize:12,color:T.rose,lineHeight:1.5}}>
+                {wipeError}
+              </div>
+            )}
+
+            <div style={{display:"flex",flexDirection:"column",gap:10,marginBottom:12}}>
+              <button
+                disabled={wipeBusy}
+                onClick={()=>wipeProfile(confirmWipe,{cloud:false})}
+                style={{padding:"16px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.lg,cursor:wipeBusy?"default":"pointer",textAlign:"left",opacity:wipeBusy?0.5:1}}>
+                <div style={{fontFamily:T.serif,fontSize:16,fontWeight:400,color:T.text1,lineHeight:1.3,marginBottom:3}}>
+                  Remove from this device
+                </div>
+                <div style={{fontSize:12,color:T.text3,lineHeight:1.5}}>
+                  Cloud data stays. Reclaim the name any time.
+                </div>
               </button>
-              <button onClick={()=>wipeProfile(confirmWipe)} style={{flex:1,padding:"16px",background:`${T.rose}22`,border:`1px solid ${T.rose}55`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:17,fontWeight:400,color:T.rose}}>
-                Remove locally
+
+              <button
+                disabled={wipeBusy}
+                onClick={()=>wipeProfile(confirmWipe,{cloud:true})}
+                style={{padding:"16px",background:`${T.rose}18`,border:`1px solid ${T.rose}55`,borderRadius:T.r.lg,cursor:wipeBusy?"default":"pointer",textAlign:"left",opacity:wipeBusy?0.5:1}}>
+                <div style={{fontFamily:T.serif,fontSize:16,fontWeight:400,color:T.rose,lineHeight:1.3,marginBottom:3}}>
+                  {wipeBusy ? "Wiping…" : "Full wipe — cloud & device"}
+                </div>
+                <div style={{fontSize:12,color:T.text3,lineHeight:1.5}}>
+                  Deletes all weights, history, and the name claim. Can't be undone.
+                </div>
               </button>
             </div>
+
+            <button
+              disabled={wipeBusy}
+              onClick={()=>setConfirmWipe(null)}
+              style={{width:"100%",padding:"12px",background:"none",border:"none",cursor:wipeBusy?"default":"pointer",fontFamily:T.sans,fontSize:13,color:T.text3}}>
+              Cancel
+            </button>
           </div>
         </div>
       )}
@@ -784,7 +831,7 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
                 What to do right now
               </div>
               <p style={{fontSize:13,color:T.text1,lineHeight:1.55}}>
-                Open Forge on your old device → tap your name → <span style={{fontStyle:"italic",fontFamily:T.serif}}>Wipe</span>. Then come back here and claim the name again. Your weights and history stay synced via cloud.
+                On your old device: tap your name → <span style={{fontStyle:"italic",fontFamily:T.serif}}>Full wipe</span>. That releases the name and deletes all your cloud data — you'll be starting fresh here. If you want to keep your history, wait until device pairing ships.
               </p>
             </div>
 
