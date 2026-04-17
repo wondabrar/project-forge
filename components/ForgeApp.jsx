@@ -1569,44 +1569,34 @@ function IosInstallOverlay({ onDismiss }) {
       <style>{`@keyframes fadeIn{from{opacity:0}to{opacity:1}}`}</style>
       <div onClick={e => e.stopPropagation()}
         style={{
-          background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,
-          padding:"28px 24px 40px",width:"100%",maxWidth:430,
+          background:T.bg2,
+          borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,
+          padding:"24px 24px calc(24px + env(safe-area-inset-bottom))",
+          width:"100%",maxWidth:430,
+          maxHeight:"92vh",overflowY:"auto",
           borderTop:`1px solid ${T.coral}33`,
           animation:`slideUp 280ms ${T.ease}`,
           position:"relative",
+          boxSizing:"border-box",
         }}>
         <button onClick={onDismiss} aria-label="Dismiss"
-          style={{position:"absolute",top:16,right:16,background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,padding:"6px 10px",cursor:"pointer",color:T.text2,fontSize:13}}>✕</button>
+          style={{position:"absolute",top:14,right:14,background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,width:30,height:30,cursor:"pointer",color:T.text2,fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
 
-        <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:8}}>
+        <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:8,paddingRight:40}}>
           Live on your home screen
         </div>
         <div style={{fontFamily:T.serif,fontSize:26,fontWeight:300,lineHeight:1.2,marginBottom:10}}>
           Install <span style={{fontStyle:"italic",color:T.coral}}>Forge</span>
         </div>
-        <p style={{fontSize:13,color:T.text2,marginBottom:22,lineHeight:1.6}}>
+        <p style={{fontSize:13,color:T.text2,marginBottom:20,lineHeight:1.6}}>
           Fullscreen. One tap to open. Works offline between sessions.
         </p>
 
         {/* Three steps — Safari's share flow */}
-        <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:24}}>
+        <div style={{display:"flex",flexDirection:"column",gap:12,marginBottom:20}}>
           <InstallStep n="1">
-            <span>Tap the share icon</span>
-            {/* iOS share glyph — simple approximation */}
-            <span aria-hidden="true" style={{
-              display:"inline-flex",alignItems:"center",justifyContent:"center",
-              width:22,height:26,marginLeft:8,
-              borderRadius:4,border:`1.5px solid ${T.coral}`,
-              position:"relative",
-            }}>
-              <span style={{
-                position:"absolute",top:-8,left:"50%",transform:"translateX(-50%)",
-                width:2,height:12,background:T.coral,
-              }}/>
-              <span style={{
-                position:"absolute",top:-6,left:"50%",transform:"translateX(-50%) rotate(45deg)",
-                width:8,height:8,borderTop:`2px solid ${T.coral}`,borderLeft:`2px solid ${T.coral}`,
-              }}/>
+            <span style={{display:"inline-flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+              Tap the share icon <ShareGlyph/>
             </span>
           </InstallStep>
           <InstallStep n="2">
@@ -1626,6 +1616,29 @@ function IosInstallOverlay({ onDismiss }) {
   );
 }
 
+// SVG glyph approximating the iOS Safari share icon — a square with an
+// up-arrow emerging from the top. Inline with the text, coral stroke.
+function ShareGlyph() {
+  return (
+    <svg
+      aria-hidden="true"
+      width="18" height="22" viewBox="0 0 18 22"
+      style={{display:"inline-block",verticalAlign:"-5px",flexShrink:0}}
+    >
+      {/* Box — lower two thirds */}
+      <rect x="2" y="8" width="14" height="12" rx="2" ry="2"
+        fill="none" stroke={T.coral} strokeWidth="1.5"/>
+      {/* Arrow shaft */}
+      <line x1="9" y1="2" x2="9" y2="13"
+        stroke={T.coral} strokeWidth="1.5" strokeLinecap="round"/>
+      {/* Arrow head */}
+      <polyline points="5,6 9,2 13,6"
+        fill="none" stroke={T.coral} strokeWidth="1.5"
+        strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
 function InstallStep({ n, children }) {
   return (
     <div style={{display:"flex",alignItems:"center",gap:14}}>
@@ -1635,7 +1648,7 @@ function InstallStep({ n, children }) {
         display:"flex",alignItems:"center",justifyContent:"center",
         fontFamily:T.serif,fontSize:14,fontWeight:400,color:T.coral,
       }}>{n}</div>
-      <div style={{flex:1,display:"flex",alignItems:"center",fontSize:14,color:T.text2,lineHeight:1.5}}>
+      <div style={{flex:1,fontSize:14,color:T.text2,lineHeight:1.5}}>
         {children}
       </div>
     </div>
