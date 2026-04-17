@@ -11,7 +11,9 @@ import { NextResponse } from "next/server";
 const normalise    = (name) => String(name || "").trim().toLowerCase();
 const metaPath     = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/meta.json`;
 const historyPath  = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/history.json`;
-const legacyPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}`;
+// Trailing slash is load-bearing — without it, list() does a prefix match that
+// catches adjacent names (e.g. "analmonk" would hit "analmonkey/meta.json").
+const legacyPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/`;
 
 // Read a private blob's JSON body via the SDK's authenticated get().
 // Returns null on not-found / parse error / any other failure.
@@ -175,6 +177,35 @@ export async function POST(request) {
     );
 
     return NextResponse.json({ ok: true, claimed: true });
+  } catch (e) {
+    return NextResponse.json({ error: e.message }, { status: 500 });
+  }
+}
+
+// DELETE /api/sync?profile=Name
+// Nukes all cloud data for a profile: meta, history, the lot.
+// Releases the name so it can be claimed again.
+//
+// No auth yet — the threat model here is "you and your 10 friends". This
+// endpoint gets locked behind passkeys when cross-device auth ships.
+export async function DELETE(request) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const profile = searchParams.get("profile");
+    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
+
+    const { blobs } = await list({ prefix: legacyPrefix(profile) });
+    if (!blobs.length) {
+      return NextResponse.json({ ok: true, deleted: 0 });
+    }
+
+    try {
+      await del(blobs.map(b => b.url));
+    } catch (e) {
+      return NextResponse.json({ error: `Delete failed: ${e.message}` }, { status: 500 });
+    }
+
+    return NextResponse.json({ ok: true, deleted: blobs.length });
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
