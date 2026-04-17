@@ -563,6 +563,7 @@ export default function ForgeApp(){
 function ProfileScreen({existing,current,onActivate,onCancel}){
   const [name,setName]=useState("");
   const [confirmWipe,setConfirmWipe]=useState(null);
+  const [showTakenHelp,setShowTakenHelp]=useState(false);
   // availability: "idle" | "checking" | "available" | "taken" | "network-err"
   const [availability,setAvailability]=useState("idle");
   const [submitting,setSubmitting]=useState(false);
@@ -707,6 +708,21 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
               <span style={{color:T.text4}}>2+ characters. Case doesn't matter.</span>
             )}
           </div>
+
+          {/* Taken → escape hatch. Cross-device sign-in lives here once
+              pairing ships. For now, surfaces an honest explainer. */}
+          {availability === "taken" && (
+            <button
+              type="button"
+              onClick={() => setShowTakenHelp(true)}
+              style={{
+                marginTop:12,background:"none",border:"none",padding:0,
+                cursor:"pointer",fontFamily:T.sans,fontSize:12,
+                color:T.coral,textAlign:"left",letterSpacing:"0.02em",
+              }}>
+              That's me →
+            </button>
+          )}
         </div>
       </Fade>
 
@@ -742,6 +758,48 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
                 Remove locally
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Taken name → honest explainer. Proper cross-device sign-in ships
+          after May launch. Until then, give the user a clear next step. */}
+      {showTakenHelp && (
+        <div onClick={()=>setShowTakenHelp(false)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.coral}33`,animation:`slideUp 260ms ${T.ease}`,maxHeight:"92vh",overflowY:"auto",boxSizing:"border-box",position:"relative"}}>
+            <button onClick={()=>setShowTakenHelp(false)} aria-label="Close" style={{position:"absolute",top:14,right:14,background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,width:30,height:30,cursor:"pointer",color:T.text2,fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+
+            <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:8,paddingRight:40}}>
+              Is this you?
+            </div>
+            <div style={{fontFamily:T.serif,fontSize:26,fontWeight:300,lineHeight:1.2,marginBottom:12}}>
+              Signing in on a <span style={{fontStyle:"italic",color:T.coral}}>new device</span>
+            </div>
+            <p style={{fontSize:13,color:T.text2,marginBottom:22,lineHeight:1.6}}>
+              Proper multi-device sign-in is shipping soon. Until then, <span style={{color:T.text1}}>{name.trim()}</span> is locked to the device where it was first claimed — this keeps your data yours and stops randoms from grabbing your name.
+            </p>
+
+            <div style={{padding:"14px 16px",borderRadius:T.r.md,background:`${T.gold}0E`,border:`1px solid ${T.gold}33`,marginBottom:22}}>
+              <div style={{fontSize:10,fontWeight:500,color:T.gold,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
+                What to do right now
+              </div>
+              <p style={{fontSize:13,color:T.text1,lineHeight:1.55}}>
+                Open Forge on your old device → tap your name → <span style={{fontStyle:"italic",fontFamily:T.serif}}>Wipe</span>. Then come back here and claim the name again. Your weights and history stay synced via cloud.
+              </p>
+            </div>
+
+            <div style={{padding:"14px 16px",borderRadius:T.r.md,background:T.bg3,border:`1px solid ${T.bg4}`,marginBottom:22}}>
+              <div style={{fontSize:10,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
+                Coming next
+              </div>
+              <p style={{fontSize:13,color:T.text2,lineHeight:1.55}}>
+                Device pairing — scan a code on your old phone to sign in here, no wipe needed. On the roadmap, not yet live.
+              </p>
+            </div>
+
+            <button onClick={()=>setShowTakenHelp(false)} style={{width:"100%",padding:"14px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:16,fontWeight:300,color:T.text2}}>
+              Got it
+            </button>
           </div>
         </div>
       )}
