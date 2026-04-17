@@ -19,7 +19,7 @@ const T = {
 const MUSCLE_COLOURS = {
   Chest:"#E0956A", Back:"#8BB09A", Shoulders:"#A5B8D0",
   Legs:"#C4A882",  Biceps:"#C9A0B8", Triceps:"#D4A574",
-  Core:"#A09890",  "Full body":"#E0956A", Other:"#6B6560",
+  Core:"#A09890",  Other:"#6B6560",
 };
 
 // ─── Main export ──────────────────────────────────────────────────────────────

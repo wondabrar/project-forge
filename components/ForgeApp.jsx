@@ -9,11 +9,13 @@ import {
 } from "@/lib/programme";
 import {
   LS, P, PB, H, bumpStreak,
+  computeRhythm, detectRecoveryPattern,
   blobPull, blobPush, flushPendingPushes,
   checkProfileExists, claimProfile,
   roundPlate, applyRpe, weeksSince, weekKey,
   newDraftLog, logSet, finaliseDraft, scaleForReadiness,
 } from "@/lib/storage";
+import { track } from "@vercel/analytics";
 import PerformanceLab from "@/components/PerformanceLab";
 
 // ─── Tokens ────────────────────────────────────────────────────────────────────
@@ -103,7 +105,7 @@ export default function ForgeApp(){
 
   const [activeProfile,setActiveProfileState]=useState(()=>typeof window!=="undefined"?P.getActive():null);
   const [showProfiles,setShowProfiles]=useState(false);
-  const [streak,setStreak]=useState(0);
+  const [streak,setStreak]=useState(0); // retained for compat — now derived from history, see useMemo below
   const [screen,setScreen]=useState("home");
   const [activeSessionIdx,setActiveSessionIdx]=useState(0);
   const [sessionSwaps,setSessionSwaps]=useState({});
@@ -113,6 +115,7 @@ export default function ForgeApp(){
   const [setNum,setSetNum]=useState(1);
   const [phase,setPhase]=useState("A");
   const [readiness,setReadiness]=useState(null);
+  const [readinessReason,setReadinessReason]=useState(null);
   const [showVid,setShowVid]=useState(false);
   const [editTarget,setEditTarget]=useState(null);
   const [awaitRpe,setAwaitRpe]=useState(false);
@@ -128,6 +131,17 @@ export default function ForgeApp(){
   const [rotationSummary,setRotationSummary]=useState(null);
   // Full session history — loaded from localStorage, merged from blob
   const [history,setHistory]=useState([]);
+  // Anti-dysmorphia: dismiss-once-per-render for recovery nudge
+  const [recoveryDismissed,setRecoveryDismissed]=useState(false);
+  // PWA install prompt (iOS needs custom UI; Android gets the OS prompt for free)
+  const [showIosInstall,setShowIosInstall]=useState(false);
+
+  // Rhythm — derived from history, no persistence needed
+  const rhythm = useMemo(() => computeRhythm(history), [history]);
+  const recoveryNudge = useMemo(
+    () => (recoveryDismissed ? null : detectRecoveryPattern(history)),
+    [history, recoveryDismissed]
+  );
 
   // Seed on profile change + pull from blob
   useEffect(()=>{
@@ -194,6 +208,37 @@ export default function ForgeApp(){
     const t=setTimeout(()=>setRestRemain(p=>p-1),1000);
     return()=>clearTimeout(t);
   },[restActive,restRemain]);
+
+  // PWA install prompt — iOS needs a custom overlay because Safari has no
+  // beforeinstallprompt event. Android/Chrome handles this natively via
+  // the manifest, so we only target iOS Safari here.
+  //
+  // Trigger rule: after the user has completed ≥1 session and isn't already
+  // installed. Shown once, dismissable, remembered via localStorage.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!activeProfile) return;
+
+    // Already dismissed in the past? Leave it alone.
+    if (LS.get("forge:iosInstallDismissed", false)) return;
+
+    // Not on iOS? Android handles the prompt natively via the manifest.
+    const ua = window.navigator.userAgent;
+    const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+    if (!isIOS) return;
+
+    // Already installed (launched from home screen)?
+    const isStandalone = window.matchMedia("(display-mode: standalone)").matches
+      || window.navigator.standalone === true;
+    if (isStandalone) return;
+
+    // Gate on ≥1 completed session — don't nag new visitors
+    if (history.length < 1) return;
+
+    // Let the user settle on home for a beat before surfacing
+    const t = setTimeout(() => setShowIosInstall(true), 1200);
+    return () => clearTimeout(t);
+  }, [activeProfile, history.length]);
 
   useEffect(()=>{
     if(!restTrigger) return;
@@ -353,7 +398,7 @@ export default function ForgeApp(){
   },[block,blockIdx,isSS,phase,setNum,activeSession,resolveExFn,pushSetToDraft]);
 
   const reset=()=>{
-    setBlockIdx(0);setSetNum(1);setPhase("A");setReadiness(null);
+    setBlockIdx(0);setSetNum(1);setPhase("A");setReadiness(null);setReadinessReason(null);
     setAwaitRpe(false);setSsRoundDone(false);
     setRestActive(false);setRestRemain(180);setRestTrigger(null);
     setSessionSwaps({});
@@ -380,6 +425,17 @@ export default function ForgeApp(){
         setHistory(H.get(activeProfile));
         draftLogRef.current = null;
       }
+
+      // Anonymous completion signal — feeds Vercel Analytics funnel.
+      // No PII, no free-text; enum-only dimensions.
+      try {
+        track("session_complete", {
+          session: sessionRecord?.session || "strength",
+          readiness: readiness || "normal",
+          readinessReason: readinessReason || "unspecified",
+          block: String(programmeBlock?.number ?? 1),
+        });
+      } catch {}
 
       // Push both meta and the just-finalised record to blob.
       // History push is incremental — only this one record, the server
@@ -483,6 +539,7 @@ export default function ForgeApp(){
       session: ["strength-a","strength-b","strength-c"][activeSessionIdx],
       blockNumber: programmeBlock.number,
       readiness,
+      readinessReason,
     });
     setScreen("session");
   };
@@ -491,12 +548,13 @@ export default function ForgeApp(){
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"        && <HomeScreen streak={streak} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length}/>}
-      {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} onStart={handleReadinessStart}/>}
+      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)}/>}
+      {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} reason={readinessReason} setReason={setReadinessReason} onStart={handleReadinessStart}/>}
       {screen==="session"     && <SessionScreen   {...sProps}/>}
       {screen==="done"        && <DoneScreen       session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/>}
       {screen==="performance" && <PerformanceLab   history={history} onBack={()=>setScreen("home")}/>}
       {rotationSummary        && <RotationSummaryModal summary={rotationSummary} onContinue={handleRotationContinue}/>}
+      {showIosInstall         && <IosInstallOverlay onDismiss={()=>{ LS.set("forge:iosInstallDismissed", true); setShowIosInstall(false); }}/>}
     </div>
   );
 }
@@ -692,7 +750,7 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
 }
 
 // ─── Home ──────────────────────────────────────────────────────────────────────
-function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0}){
+function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -749,7 +807,7 @@ function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayD
             </div>
           </div>
           <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}>
-            <StreakBadge count={streak}/>
+            <StreakBadge rhythm={rhythm}/>
             <button onClick={onProfile} style={{background:"none",border:"none",padding:0,cursor:"pointer",fontSize:11,color:T.text3,fontFamily:T.sans,fontWeight:500}}>
               {profileName} ↗
             </button>
@@ -941,6 +999,27 @@ function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayD
         </Fade>
       )}
 
+      {/* Honest recovery nudge — surfaces when the last 2 sessions were cooked.
+          Non-pushy. Dismisses in-memory for this session. */}
+      {recoveryNudge && (
+        <Fade d={180}>
+          <div style={{margin:"20px 24px 0",padding:"18px 20px",background:`${T.sage}0E`,border:`1px solid ${T.sage}35`,borderRadius:T.r.lg}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:11,fontWeight:500,color:T.sage,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
+                  A gentle nudge
+                </div>
+                <div style={{fontFamily:T.serif,fontSize:16,fontWeight:300,color:T.text1,lineHeight:1.45,fontStyle:"italic"}}>
+                  {recoveryNudge.message}
+                </div>
+              </div>
+              <button onClick={onDismissRecovery} aria-label="Dismiss"
+                style={{flexShrink:0,background:"none",border:"none",padding:"4px 8px",cursor:"pointer",fontSize:14,color:T.text3,fontFamily:T.sans}}>✕</button>
+            </div>
+          </div>
+        </Fade>
+      )}
+
       {/* Rotation nudge — surfaces after 4 weeks on a block */}
       {weeksOnBlock >= 4 && (
         <Fade d={200}>
@@ -994,11 +1073,22 @@ function HomeScreen({streak,profileName,onBegin,onProfile,weekDone={},onMarkDayD
 }
 
 // ─── Readiness ─────────────────────────────────────────────────────────────────
-function ReadinessScreen({readiness,setReadiness,onStart}){
+function ReadinessScreen({readiness,setReadiness,reason,setReason,onStart}){
   const opts=[
     {id:"fresh", icon:"○",label:"Fresh", sub:"Full programme. Push today.",       color:T.sage},
     {id:"normal",icon:"◐",label:"Normal",sub:"Standard session.",                  color:T.gold},
     {id:"cooked",icon:"●",label:"Cooked",sub:"Deload weights · trimmed volume.",   color:T.rose},
+  ];
+  // Short, enum-only reasons. Fed into session record so patterns can surface.
+  // Only surfaces when readiness is "cooked" — the one state where context
+  // is actually load-bearing for future pattern detection. Keeps the rest of
+  // the flow friction-free.
+  const reasons = [
+    {id:"slept_badly", label:"Slept badly"},
+    {id:"stressed",    label:"Stressed"},
+    {id:"recovering",  label:"Still recovering"},
+    {id:"sore",        label:"Sore"},
+    {id:"other",       label:"Something else"},
   ];
   return (
     <div style={{minHeight:"100vh",padding:"72px 24px 0"}}>
@@ -1011,7 +1101,7 @@ function ReadinessScreen({readiness,setReadiness,onStart}){
       <div style={{display:"flex",flexDirection:"column",gap:10}}>
         {opts.map((o,i)=>(
           <Fade key={o.id} d={80+i*50}>
-            <div onClick={()=>setReadiness(o.id)} style={{padding:"18px 20px",borderRadius:T.r.lg,cursor:"pointer",background:readiness===o.id?`${o.color}12`:T.bg2,border:`1px solid ${readiness===o.id?o.color+"55":T.bg3}`,display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 200ms ${T.ease}`}}>
+            <div onClick={()=>{ setReadiness(o.id); if (o.id !== "cooked") setReason(null); }} style={{padding:"18px 20px",borderRadius:T.r.lg,cursor:"pointer",background:readiness===o.id?`${o.color}12`:T.bg2,border:`1px solid ${readiness===o.id?o.color+"55":T.bg3}`,display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 200ms ${T.ease}`}}>
               <div style={{display:"flex",alignItems:"center",gap:16}}>
                 <span style={{fontSize:20,color:o.color,opacity:0.8}}>{o.icon}</span>
                 <div>
@@ -1026,6 +1116,32 @@ function ReadinessScreen({readiness,setReadiness,onStart}){
           </Fade>
         ))}
       </div>
+
+      {/* Optional "why?" — only surfaces when user picked Cooked.
+          Fresh/Normal sessions skip this to keep the flow friction-free.
+          Still skippable even when shown. */}
+      {readiness === "cooked" && (
+        <Fade d={0}>
+          <div style={{marginTop:28}}>
+            <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:10,display:"flex",alignItems:"baseline",justifyContent:"space-between"}}>
+              <span>What's going on?</span>
+              <span style={{fontSize:10,fontFamily:T.serif,fontStyle:"italic",color:T.text4,textTransform:"none",letterSpacing:0}}>optional</span>
+            </div>
+            <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+              {reasons.map(r => {
+                const sel = reason === r.id;
+                return (
+                  <div key={r.id} onClick={()=>setReason(sel ? null : r.id)}
+                    style={{padding:"8px 14px",borderRadius:T.r.pill,cursor:"pointer",background:sel?`${T.rose}18`:T.bg2,border:`1px solid ${sel?T.rose+"55":T.bg3}`,fontSize:13,fontFamily:T.serif,fontWeight:300,color:sel?T.text1:T.text2,transition:`all 180ms ${T.ease}`}}>
+                    {r.label}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </Fade>
+      )}
+
       <Fade d={280}>
         <button onClick={readiness?onStart:undefined} style={{marginTop:28,width:"100%",padding:"18px 24px",background:readiness?T.coral:T.bg2,border:`1px solid ${readiness?T.coral:T.bg3}`,borderRadius:T.r.lg,cursor:readiness?"pointer":"default",fontFamily:T.serif,fontSize:20,fontWeight:400,color:readiness?T.bg0:T.text4,transition:`all 220ms ${T.ease}`,boxShadow:readiness?`0 12px 40px ${T.strength.glow}`:"none"}}>
           Start session →
@@ -1437,13 +1553,110 @@ function DoneScreen({session,profileName,workingWeights,onHome}){
   );
 }
 
+// ─── iOS Install Overlay ─────────────────────────────────────────────────────
+// Safari on iOS doesn't surface beforeinstallprompt, so we walk the user
+// through the native "Add to Home Screen" flow ourselves. Triggered after
+// first completed session, dismissable, remembered via localStorage.
+function IosInstallOverlay({ onDismiss }) {
+  return (
+    <div
+      onClick={onDismiss}
+      style={{
+        position:"fixed",inset:0,background:"rgba(10,9,8,0.90)",zIndex:500,
+        display:"flex",alignItems:"flex-end",justifyContent:"center",
+        animation:`fadeIn 220ms ${T.ease}`,
+      }}>
+      <style>{`@keyframes fadeIn{from{opacity:0}to{opacity:1}}`}</style>
+      <div onClick={e => e.stopPropagation()}
+        style={{
+          background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,
+          padding:"28px 24px 40px",width:"100%",maxWidth:430,
+          borderTop:`1px solid ${T.coral}33`,
+          animation:`slideUp 280ms ${T.ease}`,
+          position:"relative",
+        }}>
+        <button onClick={onDismiss} aria-label="Dismiss"
+          style={{position:"absolute",top:16,right:16,background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,padding:"6px 10px",cursor:"pointer",color:T.text2,fontSize:13}}>✕</button>
+
+        <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:8}}>
+          Live on your home screen
+        </div>
+        <div style={{fontFamily:T.serif,fontSize:26,fontWeight:300,lineHeight:1.2,marginBottom:10}}>
+          Install <span style={{fontStyle:"italic",color:T.coral}}>Forge</span>
+        </div>
+        <p style={{fontSize:13,color:T.text2,marginBottom:22,lineHeight:1.6}}>
+          Fullscreen. One tap to open. Works offline between sessions.
+        </p>
+
+        {/* Three steps — Safari's share flow */}
+        <div style={{display:"flex",flexDirection:"column",gap:14,marginBottom:24}}>
+          <InstallStep n="1">
+            <span>Tap the share icon</span>
+            {/* iOS share glyph — simple approximation */}
+            <span aria-hidden="true" style={{
+              display:"inline-flex",alignItems:"center",justifyContent:"center",
+              width:22,height:26,marginLeft:8,
+              borderRadius:4,border:`1.5px solid ${T.coral}`,
+              position:"relative",
+            }}>
+              <span style={{
+                position:"absolute",top:-8,left:"50%",transform:"translateX(-50%)",
+                width:2,height:12,background:T.coral,
+              }}/>
+              <span style={{
+                position:"absolute",top:-6,left:"50%",transform:"translateX(-50%) rotate(45deg)",
+                width:8,height:8,borderTop:`2px solid ${T.coral}`,borderLeft:`2px solid ${T.coral}`,
+              }}/>
+            </span>
+          </InstallStep>
+          <InstallStep n="2">
+            <span>Scroll and pick <span style={{color:T.text1,fontFamily:T.serif,fontStyle:"italic"}}>Add to Home Screen</span></span>
+          </InstallStep>
+          <InstallStep n="3">
+            <span>Tap <span style={{color:T.text1,fontFamily:T.serif,fontStyle:"italic"}}>Add</span> — done</span>
+          </InstallStep>
+        </div>
+
+        <button onClick={onDismiss}
+          style={{width:"100%",padding:"14px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:16,fontWeight:300,color:T.text2}}>
+          Maybe later
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InstallStep({ n, children }) {
+  return (
+    <div style={{display:"flex",alignItems:"center",gap:14}}>
+      <div style={{
+        flexShrink:0,width:28,height:28,borderRadius:"50%",
+        background:`${T.coral}18`,border:`1px solid ${T.coral}44`,
+        display:"flex",alignItems:"center",justifyContent:"center",
+        fontFamily:T.serif,fontSize:14,fontWeight:400,color:T.coral,
+      }}>{n}</div>
+      <div style={{flex:1,display:"flex",alignItems:"center",fontSize:14,color:T.text2,lineHeight:1.5}}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // ─── Shared ────────────────────────────────────────────────────────────────────
 function Fade({children,d=0}){const s=useFadeIn(d);return <div style={s}>{children}</div>;}
 function Card({children,style={}}){return <div style={{background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,...style}}>{children}</div>;}
 function Tag({children,color,style={}}){return <span style={{display:"inline-flex",alignItems:"center",fontSize:10,fontWeight:500,color,background:`${color}12`,border:`1px solid ${color}33`,borderRadius:T.r.pill,padding:"4px 12px",letterSpacing:"0.08em",...style}}>{children}</span>;}
-function StreakBadge({count}){return(
-  <div style={{background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.pill,padding:"8px 16px",display:"flex",alignItems:"center",gap:8}}>
-    <span style={{fontFamily:T.serif,fontSize:24,fontWeight:400,color:T.gold,lineHeight:1}}>{count||0}</span>
-    <div style={{fontSize:9,fontWeight:500,color:T.text3,letterSpacing:"0.1em",textTransform:"uppercase",lineHeight:1.5}}>day<br/>streak</div>
-  </div>
-);}
+function StreakBadge({rhythm}){
+  const completed = rhythm?.completed || 0;
+  const expected  = rhythm?.expected  || 12;
+  // If someone's going above the expected 3x/week, show "12+" rather than capping
+  const over = completed > expected;
+  const primary = over ? `${expected}+` : `${completed}`;
+  const secondary = over ? "of 12 · strong" : `of ${expected}`;
+  return (
+    <div style={{background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.pill,padding:"8px 16px",display:"flex",alignItems:"center",gap:8}}>
+      <span style={{fontFamily:T.serif,fontSize:22,fontWeight:400,color:T.gold,lineHeight:1}}>{primary}</span>
+      <div style={{fontSize:9,fontWeight:500,color:T.text3,letterSpacing:"0.1em",textTransform:"uppercase",lineHeight:1.5}}>{secondary}<br/>this month</div>
+    </div>
+  );
+}
