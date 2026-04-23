@@ -14,13 +14,20 @@ const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normali
 // Read JSON from blob using list() + fetch (handles addRandomSuffix paths)
 async function readJsonByPrefix(prefix) {
   try {
+    console.log("[v0] readJsonByPrefix searching for prefix:", prefix);
     const { blobs } = await list({ prefix });
+    console.log("[v0] Found blobs:", blobs.length, blobs.map(b => b.pathname));
     if (!blobs.length) return null;
     const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
+    console.log("[v0] Fetching blob:", latest.url);
     const res = await fetch(latest.url);
+    console.log("[v0] Fetch response:", res.status, res.ok);
     if (!res.ok) return null;
-    return await res.json();
-  } catch {
+    const data = await res.json();
+    console.log("[v0] Parsed data:", JSON.stringify(data).slice(0, 200));
+    return data;
+  } catch (e) {
+    console.log("[v0] readJsonByPrefix error:", e);
     return null;
   }
 }
@@ -33,7 +40,9 @@ export async function POST(request) {
     }
 
     // Find credentials for this profile
-    const credData = await readJsonByPrefix(credentialsPrefix(profile));
+    const prefix = credentialsPrefix(profile);
+    console.log("[v0] login-options for profile:", profile, "prefix:", prefix);
+    const credData = await readJsonByPrefix(prefix);
     
     if (!credData?.credentials?.length) {
       return NextResponse.json(
