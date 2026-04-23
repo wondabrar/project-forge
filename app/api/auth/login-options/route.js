@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { get, put, list } from "@vercel/blob";
+import { put, list } from "@vercel/blob";
 import crypto from "crypto";
 
 // Generate authentication options for WebAuthn
@@ -9,26 +9,15 @@ import crypto from "crypto";
 const normalise = (name) => String(name || "").trim().toLowerCase();
 const credentialsPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials.json`;
 
-async function readJson(pathname) {
+// Read JSON from blob using list() + fetch (handles addRandomSuffix paths)
+async function readJsonByPrefix(prefix) {
   try {
-    const result = await get(pathname, { access: "private" });
-    if (!result || result.statusCode !== 200 || !result.stream) return null;
-    const reader = result.stream.getReader();
-    const chunks = [];
-    let total = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      total += value.length;
-    }
-    const buffer = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      buffer.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return JSON.parse(new TextDecoder().decode(buffer));
+    const { blobs } = await list({ prefix });
+    if (!blobs.length) return null;
+    const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
+    const res = await fetch(latest.url);
+    if (!res.ok) return null;
+    return await res.json();
   } catch {
     return null;
   }
@@ -50,8 +39,7 @@ export async function POST(request) {
       );
     }
 
-    const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    const credData = await readJson(latest.pathname);
+    const credData = await readJsonByPrefix(credentialsPath(profile));
     
     if (!credData?.credentials?.length) {
       return NextResponse.json(
