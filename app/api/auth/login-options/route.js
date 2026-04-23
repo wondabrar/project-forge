@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { put, list } from "@vercel/blob";
+import { put, list, head } from "@vercel/blob";
 import crypto from "crypto";
 
 // Generate authentication options for WebAuthn
@@ -11,13 +11,15 @@ const normalise = (name) => String(name || "").trim().toLowerCase();
 // So credentials.json becomes credentials-ABC123.json
 const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials`;
 
-// Read JSON from blob using list() + fetch (handles addRandomSuffix paths)
+// Read JSON from blob using list() + head() for private blob access
 async function readJsonByPrefix(prefix) {
   try {
     const { blobs } = await list({ prefix });
     if (!blobs.length) return null;
     const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    const res = await fetch(latest.url);
+    // Use head() to get downloadUrl which includes auth token for private blobs
+    const { downloadUrl } = await head(latest.url);
+    const res = await fetch(downloadUrl);
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -33,7 +35,9 @@ export async function POST(request) {
     }
 
     // Find credentials for this profile
-    const credData = await readJsonByPrefix(credentialsPrefix(profile));
+    const prefix = credentialsPrefix(profile);
+    console.log("[v0] login-options for profile:", profile, "prefix:", prefix);
+    const credData = await readJsonByPrefix(prefix);
     
     if (!credData?.credentials?.length) {
       return NextResponse.json(
