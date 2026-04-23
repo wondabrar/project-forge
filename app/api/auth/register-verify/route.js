@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
-import { put, list, del, get } from "@vercel/blob";
+import { put } from "@vercel/blob";
 import crypto from "crypto";
+import { readJsonDirect, readJsonByPrefix, deleteByPrefix } from "@/lib/blob-utils";
 
 // Verify WebAuthn registration and store credential
 // POST /api/auth/register-verify
@@ -11,44 +12,6 @@ const normalise = (name) => String(name || "").trim().toLowerCase();
 const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials`;
 // Full path for writing new credentials (will get suffix added)
 const credentialsPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials.json`;
-
-// Read JSON from private blob using list() + get() (for blobs with random suffix)
-async function readJsonByPrefix(prefix) {
-  try {
-    const { blobs } = await list({ prefix });
-    if (!blobs.length) return null;
-    const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    return await readJsonDirect(latest.pathname);
-  } catch {
-    return null;
-  }
-}
-
-// Read JSON directly by exact pathname (for blobs without random suffix like challenges)
-async function readJsonDirect(pathname) {
-  try {
-    const result = await get(pathname, { access: "private" });
-    if (!result || result.statusCode !== 200 || !result.stream) return null;
-    const reader = result.stream.getReader();
-    const chunks = [];
-    let total = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      total += value.length;
-    }
-    const buffer = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      buffer.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return JSON.parse(new TextDecoder().decode(buffer));
-  } catch {
-    return null;
-  }
-}
 
 function base64urlToBuffer(base64url) {
   const base64 = base64url.replace(/-/g, "+").replace(/_/g, "/");
@@ -123,10 +86,7 @@ export async function POST(request) {
     };
 
     // Clean up old credentials file if exists
-    const { blobs } = await list({ prefix: credentialsPrefix(profile) });
-    if (blobs.length) {
-      try { await del(blobs.map(b => b.url)); } catch {}
-    }
+    await deleteByPrefix(credentialsPrefix(profile));
 
     // Save credentials
     await put(credentialsPath(profile), JSON.stringify(updated), {
@@ -136,12 +96,7 @@ export async function POST(request) {
     });
 
     // Clean up challenge
-    try {
-      const { blobs: challengeBlobs } = await list({ prefix: challengeKey });
-      if (challengeBlobs.length) {
-        await del(challengeBlobs.map(b => b.url));
-      }
-    } catch {}
+    await deleteByPrefix(challengeKey);
 
     return NextResponse.json({
       ok: true,
