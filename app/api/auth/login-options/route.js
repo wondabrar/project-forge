@@ -12,16 +12,32 @@ const normalise = (name) => String(name || "").trim().toLowerCase();
 const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials`;
 
 // Read JSON from private blob using list() + get()
+// Uses the same pattern as sync route - get() expects pathname, not URL
 async function readJsonByPrefix(prefix) {
   try {
     const { blobs } = await list({ prefix });
     if (!blobs.length) return null;
     const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    // Use get() for private blobs - handles auth internally
-    const result = await get(latest.url, { access: "private" });
-    if (!result) return null;
-    const text = await result.text();
-    return JSON.parse(text);
+    // IMPORTANT: get() expects pathname, not url
+    const result = await get(latest.pathname, { access: "private" });
+    if (!result || result.statusCode !== 200 || !result.stream) return null;
+    // Consume the ReadableStream into a string (same as sync route)
+    const reader = result.stream.getReader();
+    const chunks = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      total += value.length;
+    }
+    const buffer = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      buffer.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return JSON.parse(new TextDecoder().decode(buffer));
   } catch {
     return null;
   }
