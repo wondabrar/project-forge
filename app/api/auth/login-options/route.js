@@ -83,16 +83,16 @@ export async function POST(request) {
       allowOverwrite: true,
     });
 
-    // Get the origin for RP ID
-    const origin = request.headers.get("origin") || request.headers.get("host");
-    const rpId = origin?.replace(/^https?:\/\//, "").split(":")[0] || "localhost";
+    // RP ID must be consistent between registration and authentication
+    const host = request.headers.get("host") || "";
+    const rpId = host.includes("localhost") ? "localhost" : "theforged.fit";
 
     return NextResponse.json({
       challenge,
       rpId,
       timeout: 60000,
       allowCredentials: credData.credentials.map(cred => ({
-        id: cred.rawId,
+        id: cred.id, // Use credential id, not rawId
         type: "public-key",
         transports: ["internal", "hybrid"],
       })),
