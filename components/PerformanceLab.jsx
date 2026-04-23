@@ -5,22 +5,7 @@ import {
   mainLiftTrend, weeklyVolume, consistencyGrid,
   readinessBreakdown, sessionCount, detectPlateaus,
 } from "@/lib/analytics";
-
-// ─── Tokens (local copy — PerformanceLab is standalone) ──────────────────────
-const T = {
-  bg0:"#131110", bg1:"#1A1714", bg2:"#23201B", bg3:"#2D2924", bg4:"#38342E",
-  text1:"#EDEBE7", text2:"#A09890", text3:"#6B6560", text4:"#403C38",
-  coral:"#E0956A", sage:"#8BB09A", gold:"#C4A882", steel:"#A5B8D0", rose:"#C9A0B8",
-  serif:"var(--font-fraunces), serif", sans:"var(--font-dm-sans), sans-serif",
-  r:{sm:8, md:14, lg:20, xl:28, pill:999},
-  ease:"cubic-bezier(0.22, 1, 0.36, 1)",
-};
-
-const MUSCLE_COLOURS = {
-  Chest:"#E0956A", Back:"#8BB09A", Shoulders:"#A5B8D0",
-  Legs:"#C4A882",  Biceps:"#C9A0B8", Triceps:"#D4A574",
-  Core:"#A09890",  Other:"#6B6560",
-};
+import { T, MUSCLE_COLOURS } from "@/lib/tokens";
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 export default function PerformanceLab({ history, onBack }) {
