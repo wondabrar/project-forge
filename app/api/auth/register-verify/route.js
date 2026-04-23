@@ -7,6 +7,9 @@ import crypto from "crypto";
 // Body: { profile: string, credential: { id, rawId, type, response: { clientDataJSON, attestationObject } } }
 
 const normalise = (name) => String(name || "").trim().toLowerCase();
+// Note: Vercel Blob addRandomSuffix inserts BEFORE extension
+const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials`;
+// Full path for writing new credentials (will get suffix added)
 const credentialsPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials.json`;
 
 // Read JSON from blob using list() + fetch (handles addRandomSuffix paths)
@@ -76,7 +79,7 @@ export async function POST(request) {
     // The credential ID is sufficient for authentication since we verify via the browser.
 
     // Load existing credentials
-    const existing = await readJsonByPrefix(credentialsPath(profile)) || { credentials: [] };
+    const existing = await readJsonByPrefix(credentialsPrefix(profile)) || { credentials: [] };
     
     // Add new credential
     const newCredential = {
@@ -97,7 +100,7 @@ export async function POST(request) {
     };
 
     // Clean up old credentials file if exists
-    const { blobs } = await list({ prefix: credentialsPath(profile) });
+    const { blobs } = await list({ prefix: credentialsPrefix(profile) });
     if (blobs.length) {
       try { await del(blobs.map(b => b.url)); } catch {}
     }
