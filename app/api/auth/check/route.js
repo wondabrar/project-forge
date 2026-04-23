@@ -1,36 +1,14 @@
 import { NextResponse } from "next/server";
-import { list, get } from "@vercel/blob";
+import { list } from "@vercel/blob";
 
 // Check if a profile has passkeys registered
 // GET /api/auth/check?profile=Name
+//
+// Uses list() with prefix to find credentials blobs (they have random suffixes).
+// If any blob exists at the credentials path prefix, the profile has passkeys.
 
 const normalise = (name) => String(name || "").trim().toLowerCase();
 const credentialsPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials.json`;
-
-async function readJson(pathname) {
-  try {
-    const result = await get(pathname, { access: "private" });
-    if (!result || result.statusCode !== 200 || !result.stream) return null;
-    const reader = result.stream.getReader();
-    const chunks = [];
-    let total = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      total += value.length;
-    }
-    const buffer = new Uint8Array(total);
-    let offset = 0;
-    for (const chunk of chunks) {
-      buffer.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return JSON.parse(new TextDecoder().decode(buffer));
-  } catch {
-    return null;
-  }
-}
 
 export async function GET(request) {
   try {
@@ -41,17 +19,14 @@ export async function GET(request) {
       return NextResponse.json({ error: "No profile" }, { status: 400 });
     }
 
+    // List blobs with the credentials path prefix (handles random suffix from put())
     const { blobs } = await list({ prefix: credentialsPath(profile) });
-    if (!blobs.length) {
-      return NextResponse.json({ hasPasskey: false });
-    }
-
-    const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    const credData = await readJson(latest.pathname);
     
+    // If any credentials blob exists, the profile has passkeys
+    // We don't need to read the contents - existence is enough
     return NextResponse.json({
-      hasPasskey: credData?.credentials?.length > 0,
-      credentialCount: credData?.credentials?.length || 0,
+      hasPasskey: blobs.length > 0,
+      credentialCount: blobs.length > 0 ? 1 : 0, // Simplified - we know at least 1 exists
     });
   } catch (e) {
     return NextResponse.json({ error: e.message }, { status: 500 });

@@ -788,13 +788,20 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
     isPlatformAuthenticatorAvailable().then(setWebAuthnSupported);
   }, []);
 
-  // Check if each profile has a passkey
+  // Check if each profile has a passkey (including current profile on every render)
   useEffect(() => {
+    // Check all existing profiles
     existing.forEach(async (profile) => {
       const has = await hasPasskey(profile);
       setProfileHasPasskey(prev => ({ ...prev, [profile]: has }));
     });
-  }, [existing]);
+    // Also explicitly check current profile (handles navigation back to this screen)
+    if (current) {
+      hasPasskey(current).then(has => {
+        setProfileHasPasskey(prev => ({ ...prev, [current]: has }));
+      });
+    }
+  }, [existing, current]);
 
   // Expanded wipe: opts.cloud === true also nukes cloud data via DELETE /api/sync.
   // opts.cloud === false only clears local storage (fast, offline-safe).
@@ -1207,7 +1214,7 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
   );
 }
 
-// ─── Home ───────────────────────────────��──────────────────────────────────────
+// ─── Home ─────────────────────��─────────��──────────────────────────────────────
 function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle"}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
