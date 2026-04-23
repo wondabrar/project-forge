@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { put, list, del, head } from "@vercel/blob";
+import { put, list, del, get } from "@vercel/blob";
 import crypto from "crypto";
 
 // Verify WebAuthn authentication
@@ -10,16 +10,16 @@ const normalise = (name) => String(name || "").trim().toLowerCase();
 // Note: Vercel Blob addRandomSuffix inserts BEFORE extension
 const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials`;
 
-// Read JSON from blob using list() + head() for private blob access
+// Read JSON from private blob using list() + get()
 async function readJsonByPrefix(prefix) {
   try {
     const { blobs } = await list({ prefix });
     if (!blobs.length) return null;
     const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    const { downloadUrl } = await head(latest.url);
-    const res = await fetch(downloadUrl);
-    if (!res.ok) return null;
-    return await res.json();
+    const result = await get(latest.url, { access: "private" });
+    if (!result) return null;
+    const text = await result.text();
+    return JSON.parse(text);
   } catch {
     return null;
   }
