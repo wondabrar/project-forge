@@ -19,16 +19,23 @@ export async function GET(request) {
       return NextResponse.json({ error: "No profile" }, { status: 400 });
     }
 
+    const prefix = credentialsPath(profile);
+    console.log("[v0] Checking passkey for profile:", profile, "normalised:", normalise(profile), "prefix:", prefix);
+    
     // List blobs with the credentials path prefix (handles random suffix from put())
-    const { blobs } = await list({ prefix: credentialsPath(profile) });
+    const { blobs } = await list({ prefix });
+    
+    console.log("[v0] Found blobs:", blobs.length, blobs.map(b => b.pathname));
     
     // If any credentials blob exists, the profile has passkeys
     // We don't need to read the contents - existence is enough
     return NextResponse.json({
       hasPasskey: blobs.length > 0,
-      credentialCount: blobs.length > 0 ? 1 : 0, // Simplified - we know at least 1 exists
+      credentialCount: blobs.length > 0 ? 1 : 0,
+      debug: { prefix, blobCount: blobs.length, paths: blobs.map(b => b.pathname) },
     });
   } catch (e) {
+    console.error("[v0] Check passkey error:", e);
     return NextResponse.json({ error: e.message }, { status: 500 });
   }
 }
