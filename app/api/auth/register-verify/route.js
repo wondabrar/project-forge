@@ -65,7 +65,9 @@ export async function POST(request) {
 
     // Retrieve and validate the challenge
     const challengeKey = `forge/challenges/${userId}`;
+    console.log("[v0] register-verify: looking for challenge at", challengeKey);
     const challengeData = await readJsonByPrefix(challengeKey);
+    console.log("[v0] register-verify: challengeData =", challengeData);
     
     if (!challengeData) {
       return NextResponse.json({ error: "No pending registration" }, { status: 400 });
@@ -122,11 +124,13 @@ export async function POST(request) {
     }
 
     // Save credentials
-    await put(credentialsPath(profile), JSON.stringify(updated), {
+    console.log("[v0] register-verify: saving credentials to", credentialsPath(profile));
+    const putResult = await put(credentialsPath(profile), JSON.stringify(updated), {
       access: "private",
       contentType: "application/json",
       addRandomSuffix: true,
     });
+    console.log("[v0] register-verify: put result =", putResult.pathname);
 
     // Clean up challenge
     try {

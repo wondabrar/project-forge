@@ -69,7 +69,7 @@ export async function POST(request) {
       .update(normalise(profile))
       .digest("base64url");
 
-    // Store challenge for verification
+    // Store challenge for verification (overwrite any stale challenge)
     const challengeKey = `forge/challenges/${userId}`;
     await put(challengeKey, JSON.stringify({ 
       challenge, 
@@ -80,6 +80,7 @@ export async function POST(request) {
       access: "private",
       contentType: "application/json",
       addRandomSuffix: false,
+      allowOverwrite: true,
     });
 
     // Get the origin for RP ID

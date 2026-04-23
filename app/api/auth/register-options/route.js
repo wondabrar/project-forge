@@ -42,6 +42,7 @@ export async function POST(request) {
       access: "private",
       contentType: "application/json",
       addRandomSuffix: false,
+      allowOverwrite: true,
     });
 
     // Get the origin for RP ID
