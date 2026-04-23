@@ -646,14 +646,20 @@ function TakenNameModal({ name, webAuthnSupported, onClose, onActivate, passkeyB
 
   // Check if this profile has a passkey
   useEffect(() => {
-    hasPasskey(name).then(setHasProfilePasskey);
+    console.log("[v0] TakenNameModal checking passkey for:", name);
+    hasPasskey(name).then(has => {
+      console.log("[v0] hasPasskey result for", name, ":", has);
+      setHasProfilePasskey(has);
+    });
   }, [name]);
 
   const handlePasskeySignIn = async () => {
+    console.log("[v0] handlePasskeySignIn starting for:", name);
     setPasskeyBusy(true);
     setPasskeyError(null);
     try {
       const result = await authenticatePasskey(name);
+      console.log("[v0] authenticatePasskey result:", result);
       if (result?.verified) {
         setAuthSuccess(true);
         // Add profile locally and activate
@@ -2156,7 +2162,7 @@ function InstallStep({ n, children }) {
   );
 }
 
-// ─── Shared ────────────────────────────────────────────────────────────────────
+// ─── Shared ──────────────────────────────────────────────────────────��─────────
 function Fade({children,d=0}){const s=useFadeIn(d);return <div style={s}>{children}</div>;}
 function Card({children,style={}}){return <div style={{background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,...style}}>{children}</div>;}
 function Tag({children,color,style={}}){return <span style={{display:"inline-flex",alignItems:"center",fontSize:10,fontWeight:500,color,background:`${color}12`,border:`1px solid ${color}33`,borderRadius:T.r.pill,padding:"4px 12px",letterSpacing:"0.08em",...style}}>{children}</span>;}
