@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { put, list } from "@vercel/blob";
+import { put, list, head } from "@vercel/blob";
 import crypto from "crypto";
 
 // Generate authentication options for WebAuthn
@@ -11,23 +11,18 @@ const normalise = (name) => String(name || "").trim().toLowerCase();
 // So credentials.json becomes credentials-ABC123.json
 const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials`;
 
-// Read JSON from blob using list() + fetch (handles addRandomSuffix paths)
+// Read JSON from blob using list() + head() for private blob access
 async function readJsonByPrefix(prefix) {
   try {
-    console.log("[v0] readJsonByPrefix searching for prefix:", prefix);
     const { blobs } = await list({ prefix });
-    console.log("[v0] Found blobs:", blobs.length, blobs.map(b => b.pathname));
     if (!blobs.length) return null;
     const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    console.log("[v0] Fetching blob:", latest.url);
-    const res = await fetch(latest.url);
-    console.log("[v0] Fetch response:", res.status, res.ok);
+    // Use head() to get downloadUrl which includes auth token for private blobs
+    const { downloadUrl } = await head(latest.url);
+    const res = await fetch(downloadUrl);
     if (!res.ok) return null;
-    const data = await res.json();
-    console.log("[v0] Parsed data:", JSON.stringify(data).slice(0, 200));
-    return data;
-  } catch (e) {
-    console.log("[v0] readJsonByPrefix error:", e);
+    return await res.json();
+  } catch {
     return null;
   }
 }

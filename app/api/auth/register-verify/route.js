@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { put, list, del } from "@vercel/blob";
+import { put, list, del, head } from "@vercel/blob";
 import crypto from "crypto";
 
 // Verify WebAuthn registration and store credential
@@ -12,14 +12,14 @@ const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normali
 // Full path for writing new credentials (will get suffix added)
 const credentialsPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials.json`;
 
-// Read JSON from blob using list() + fetch (handles addRandomSuffix paths)
+// Read JSON from blob using list() + head() for private blob access
 async function readJsonByPrefix(prefix) {
   try {
     const { blobs } = await list({ prefix });
     if (!blobs.length) return null;
-    // Get the most recent blob if multiple exist
     const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    const res = await fetch(latest.url);
+    const { downloadUrl } = await head(latest.url);
+    const res = await fetch(downloadUrl);
     if (!res.ok) return null;
     return await res.json();
   } catch {
