@@ -7,7 +7,9 @@ import crypto from "crypto";
 // Body: { profile: string }
 
 const normalise = (name) => String(name || "").trim().toLowerCase();
-const credentialsPath = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials.json`;
+// Note: Vercel Blob addRandomSuffix inserts BEFORE extension
+// So credentials.json becomes credentials-ABC123.json
+const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials`;
 
 // Read JSON from blob using list() + fetch (handles addRandomSuffix paths)
 async function readJsonByPrefix(prefix) {
@@ -31,15 +33,7 @@ export async function POST(request) {
     }
 
     // Find credentials for this profile
-    const { blobs } = await list({ prefix: credentialsPath(profile) });
-    if (!blobs.length) {
-      return NextResponse.json(
-        { error: "No passkey registered for this profile" },
-        { status: 404 }
-      );
-    }
-
-    const credData = await readJsonByPrefix(credentialsPath(profile));
+    const credData = await readJsonByPrefix(credentialsPrefix(profile));
     
     if (!credData?.credentials?.length) {
       return NextResponse.json(
