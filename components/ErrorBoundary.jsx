@@ -14,8 +14,8 @@ export default class ErrorBoundary extends Component {
   }
 
   componentDidCatch(error, errorInfo) {
-    // Log to console in development
-    console.error("[Forge] Error caught by boundary:", error, errorInfo);
+    // Log to console for debugging — no third-party error reporting yet
+    console.error("[forge:boundary]", error, errorInfo);
   }
 
   handleReset = () => {

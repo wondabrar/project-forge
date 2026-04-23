@@ -11,6 +11,7 @@ import {
   LS, P, PB, H, bumpStreak,
   computeRhythm, detectRecoveryPattern,
   blobPush, flushPendingPushes, getLocalProfile, backgroundSync, SyncStatus,
+  enableAutoSync, disableAutoSync,
   checkProfileExists, claimProfile, blobDelete,
   roundPlate, applyRpe, weeksSince, weekKey,
   newDraftLog, logSet, finaliseDraft, scaleForReadiness,
@@ -22,6 +23,7 @@ import {
 } from "@/lib/webauthn";
 import { track } from "@vercel/analytics";
 import PerformanceLab from "@/components/PerformanceLab";
+import ErrorBoundary from "@/components/ErrorBoundary";
 
 // ─── Fade hook ─────────────────────────────────────────────────────────────────
 function useFadeIn(d=0){
@@ -262,17 +264,20 @@ export default function ForgeApp(){
     }));
 
     // BACKGROUND: Sync from blob, update state if remote has newer data
-    backgroundSync(activeProfile, {
-      onUpdate: ({ meta, history: remoteHistory }) => {
-        // Blob had newer data — update React state silently
-        if (meta.weights) setWWState(meta.weights);
-        if (meta.reps) setWRState(meta.reps);
-        if (meta.streak?.count) setStreak(meta.streak.count);
-        if (meta.programmeBlock) setProgrammeBlock(meta.programmeBlock);
-        if (remoteHistory?.length) setHistory(remoteHistory);
-      },
-      // Errors are swallowed — offline is fine, we have local data
-    });
+    const onSyncUpdate = ({ meta, history: remoteHistory }) => {
+      // Blob had newer data — update React state silently
+      if (meta.weights) setWWState(meta.weights);
+      if (meta.reps) setWRState(meta.reps);
+      if (meta.streak?.count) setStreak(meta.streak.count);
+      if (meta.programmeBlock) setProgrammeBlock(meta.programmeBlock);
+      if (remoteHistory?.length) setHistory(remoteHistory);
+    };
+    
+    backgroundSync(activeProfile, { onUpdate: onSyncUpdate });
+    
+    // Enable auto-sync on visibility change and online events
+    enableAutoSync(activeProfile, onSyncUpdate);
+    return () => disableAutoSync();
   },[activeProfile]);
 
   // Rest timer tick
@@ -624,9 +629,9 @@ export default function ForgeApp(){
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
       {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)}/>}
       {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} reason={readinessReason} setReason={setReadinessReason} onStart={handleReadinessStart}/>}
-      {screen==="session"     && <SessionScreen   {...sProps}/>}
-      {screen==="done"        && <DoneScreen       session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/>}
-      {screen==="performance" && <PerformanceLab   history={history} onBack={()=>setScreen("home")}/>}
+      {screen==="session"     && <ErrorBoundary><SessionScreen {...sProps}/></ErrorBoundary>}
+      {screen==="done"        && <ErrorBoundary><DoneScreen session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/></ErrorBoundary>}
+      {screen==="performance" && <ErrorBoundary><PerformanceLab history={history} onBack={()=>setScreen("home")}/></ErrorBoundary>}
       {rotationSummary        && <RotationSummaryModal summary={rotationSummary} onContinue={handleRotationContinue}/>}
       {showIosInstall         && <IosInstallOverlay onDismiss={()=>{ LS.set("forge:iosInstallDismissed", true); setShowIosInstall(false); }}/>}
     </div>
@@ -1638,7 +1643,7 @@ function RpeCard({onPick,label="How was that set?"}){
   );
 }
 
-// ─── Session ───────────────────────────────────────────────────────────────────
+// ─── Session ───────────────────────────��───────────────────────────────────────
 function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,resolvedExA,resolvedExB,resolvedEx,swapKey,onSwap,showVid,setShowVid,getW,getR,editTarget,setEditTarget,workingWeights,setWW,workingReps,setWR,awaitRpe,ssRoundDone,restActive,restRemain,setRestActive,setRestRemain,onCommit,onLog,onQuit}){
   const {strength:s}=T;
   const [swapEx,setSwapEx]=useState(null);
@@ -1869,7 +1874,7 @@ function SwapOverlay({activeEx,swapKey,onSwap,onClose}){
   );
 }
 
-// ─── Rotation Summary Modal ───────────────────────────────────────────────────
+// ─── Rotation Summary Modal ───────────────────���───────────────────────────────
 // Shown when auto-rotation fires. Non-dismissible — you acknowledge, you continue.
 function RotationSummaryModal({summary,onContinue}){
   const {gold}=T;
@@ -1977,6 +1982,10 @@ function DoneScreen({session,profileName,workingWeights,onHome}){
   const nextType= WEEK[nextIdx]?.type ?? "rest";
   const nextMsg = NEXT_DAY_MSG[nextType] ?? "";
 
+  // Sync status for confirmation line
+  const [syncState, setSyncState] = useState(SyncStatus.get());
+  useEffect(() => SyncStatus.subscribe(setSyncState), []);
+
   return (
     <div style={{minHeight:"100vh",padding:"72px 24px 0",position:"relative",overflow:"hidden"}}>
       <div style={{position:"absolute",top:-120,left:"50%",transform:"translateX(-50%)",width:420,height:380,background:`radial-gradient(circle,${T.strength.glow} 0%,transparent 65%)`,pointerEvents:"none"}}/>
@@ -2011,6 +2020,28 @@ function DoneScreen({session,profileName,workingWeights,onHome}){
         <button onClick={onHome} style={{marginTop:20,width:"100%",padding:"18px 24px",background:T.coral,border:"none",borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:20,fontWeight:400,color:T.bg0,boxShadow:`0 12px 40px ${T.strength.glow}`}}>
           Back to home →
         </button>
+      </Fade>
+
+      {/* Sync confirmation line */}
+      <Fade d={320}>
+        <div style={{marginTop:24,textAlign:"center",fontSize:12,color:syncState.state==="idle"?T.sage:T.gold,display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+          {syncState.state === "idle" || syncState.state === "pushing" ? (
+            <>
+              <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:T.sage}}/>
+              Synced
+            </>
+          ) : syncState.state === "pulling" ? (
+            <>
+              <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:T.steel,animation:"pulse 1s ease-in-out infinite"}}/>
+              Syncing...
+            </>
+          ) : (
+            <>
+              <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:T.gold}}/>
+              Saved locally — will sync when online
+            </>
+          )}
+        </div>
       </Fade>
     </div>
   );
