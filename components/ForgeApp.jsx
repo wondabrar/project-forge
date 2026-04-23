@@ -647,19 +647,14 @@ function TakenNameModal({ name, webAuthnSupported, onClose, onActivate, passkeyB
   // Check if this profile has a passkey
   useEffect(() => {
     console.log("[v0] TakenNameModal checking passkey for:", name);
-    hasPasskey(name).then(has => {
-      console.log("[v0] hasPasskey result for", name, ":", has);
-      setHasProfilePasskey(has);
-    });
+    hasPasskey(name).then(setHasProfilePasskey);
   }, [name]);
 
   const handlePasskeySignIn = async () => {
-    console.log("[v0] handlePasskeySignIn starting for:", name);
     setPasskeyBusy(true);
     setPasskeyError(null);
     try {
       const result = await authenticatePasskey(name);
-      console.log("[v0] authenticatePasskey result:", result);
       if (result?.verified) {
         setAuthSuccess(true);
         // Add profile locally and activate
