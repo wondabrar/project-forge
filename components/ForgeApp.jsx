@@ -10,28 +10,18 @@ import {
 import {
   LS, P, PB, H, bumpStreak,
   computeRhythm, detectRecoveryPattern,
-  blobPull, blobPush, flushPendingPushes,
+  blobPush, flushPendingPushes, getLocalProfile, backgroundSync, SyncStatus,
   checkProfileExists, claimProfile, blobDelete,
   roundPlate, applyRpe, weeksSince, weekKey,
   newDraftLog, logSet, finaliseDraft, scaleForReadiness,
 } from "@/lib/storage";
+import { T } from "@/lib/tokens";
+import {
+  isWebAuthnSupported, isPlatformAuthenticatorAvailable,
+  registerPasskey, authenticatePasskey, hasPasskey,
+} from "@/lib/webauthn";
 import { track } from "@vercel/analytics";
 import PerformanceLab from "@/components/PerformanceLab";
-
-// ─── Tokens ────────────────────────────────────────────────────────────────────
-const T = {
-  bg0:"#131110",bg1:"#1A1714",bg2:"#23201B",bg3:"#2D2924",bg4:"#38342E",
-  text1:"#EDEBE7",text2:"#A09890",text3:"#6B6560",text4:"#403C38",
-  coral:"#E0956A",sage:"#8BB09A",gold:"#C4A882",steel:"#A5B8D0",rose:"#C9A0B8",
-  strength:{main:"#E0956A",dim:"rgba(224,149,106,0.10)",glow:"rgba(224,149,106,0.18)"},
-  zone2:   {main:"#A5B8D0",dim:"rgba(165,184,208,0.10)",glow:"rgba(165,184,208,0.14)"},
-  hiit:    {main:"#C9A0B8",dim:"rgba(201,160,184,0.10)",glow:"rgba(201,160,184,0.16)"},
-  cardio:  {main:"#A5B8D0",dim:"rgba(165,184,208,0.09)",glow:"rgba(165,184,208,0.12)"},
-  rest:    {main:"#6B6560",dim:"rgba(107,101,96,0.08)", glow:"rgba(107,101,96,0.10)"},
-  serif:"var(--font-fraunces), serif", sans:"var(--font-dm-sans), sans-serif",
-  r:{sm:8,md:14,lg:20,xl:28,pill:999},
-  ease:"cubic-bezier(0.22, 1, 0.36, 1)",
-};
 
 // ─── Fade hook ─────────────────────────────────────────────────────────────────
 function useFadeIn(d=0){
@@ -98,6 +88,103 @@ function ScrollDrum({value,onChange,step=1.25,min=0,max=500,integer=false,label=
   );
 }
 
+// ─── Sync Status Card ──────────────────────────────────────────────────────────
+function SyncStatusCard({ profile }) {
+  const [status, setStatus] = useState(SyncStatus.get());
+  const [retrying, setRetrying] = useState(false);
+
+  useEffect(() => SyncStatus.subscribe(setStatus), []);
+
+  const handleRetry = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    await backgroundSync(profile, {
+      onUpdate: () => {}, // State is handled by the parent component
+    });
+    setRetrying(false);
+  };
+
+  const formatTime = (ts) => {
+    if (!ts) return "never";
+    const diff = Date.now() - ts;
+    if (diff < 60000) return "just now";
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    return new Date(ts).toLocaleDateString();
+  };
+
+  const stateLabel = {
+    idle: "Synced",
+    pulling: "Syncing...",
+    pushing: "Saving...",
+    error: "Offline",
+  };
+
+  const stateColour = {
+    idle: T.sage,
+    pulling: T.steel,
+    pushing: T.steel,
+    error: T.coral,
+  };
+
+  return (
+    <div style={{
+      marginTop: 16,
+      padding: "14px 18px",
+      background: T.bg2,
+      border: `1px solid ${T.bg3}`,
+      borderRadius: T.r.lg,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          background: stateColour[status.state],
+          animation: status.state === "pulling" || status.state === "pushing" ? "pulse 1s ease-in-out infinite" : "none",
+        }} />
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 500, color: T.text1 }}>
+            {stateLabel[status.state]}
+          </div>
+          {status.lastSync && status.state === "idle" && (
+            <div style={{ fontSize: 11, color: T.text3, marginTop: 2 }}>
+              Last sync: {formatTime(status.lastSync)}
+            </div>
+          )}
+          {status.error && (
+            <div style={{ fontSize: 11, color: T.text3, marginTop: 2 }}>
+              Will retry when online
+            </div>
+          )}
+        </div>
+      </div>
+      {status.state === "error" && (
+        <button
+          onClick={handleRetry}
+          disabled={retrying}
+          style={{
+            padding: "8px 14px",
+            background: T.bg3,
+            border: `1px solid ${T.bg4}`,
+            borderRadius: T.r.md,
+            fontSize: 12,
+            fontWeight: 500,
+            color: T.text2,
+            cursor: retrying ? "default" : "pointer",
+            opacity: retrying ? 0.6 : 1,
+          }}
+        >
+          {retrying ? "..." : "Retry"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ─── Root ──────────────────────────────────────────────────────────────────────
 export default function ForgeApp(){
   const [mounted,setMounted]=useState(false);
@@ -135,6 +222,13 @@ export default function ForgeApp(){
   const [recoveryDismissed,setRecoveryDismissed]=useState(false);
   // PWA install prompt (iOS needs custom UI; Android gets the OS prompt for free)
   const [showIosInstall,setShowIosInstall]=useState(false);
+  // Sync status for subtle UI indicator
+  const [syncState,setSyncState]=useState("idle"); // "idle" | "pulling" | "pushing" | "error"
+
+  // Subscribe to sync status changes
+  useEffect(() => {
+    return SyncStatus.subscribe(status => setSyncState(status.state));
+  }, []);
 
   // Rhythm — derived from history, no persistence needed
   const rhythm = useMemo(() => computeRhythm(history), [history]);
@@ -143,14 +237,18 @@ export default function ForgeApp(){
     [history, recoveryDismissed]
   );
 
-  // Seed on profile change + pull from blob
+  // Seed on profile change: instant load from localStorage, background sync from blob
   useEffect(()=>{
     if(!activeProfile) return;
-    setWWState(P.getWeights(activeProfile));
-    setWRState(P.getReps(activeProfile));
-    setStreak(P.getStreak(activeProfile).count);
+    
+    // INSTANT: Load from localStorage (0ms, works offline)
+    const local = getLocalProfile(activeProfile);
+    setWWState(local.meta.weights || {});
+    setWRState(local.meta.reps || {});
+    setStreak(local.meta.streak?.count || 0);
+    setProgrammeBlock(local.meta.programmeBlock || PB.get());
     setWeekDone(P.getWeekDone(activeProfile));
-    setHistory(H.get(activeProfile));
+    setHistory(local.history || []);
 
     // Retry any failed pushes from previous sessions
     flushPendingPushes((profile) => ({
@@ -163,41 +261,17 @@ export default function ForgeApp(){
       history: H.get(profile),
     }));
 
-    blobPull(activeProfile).then(remote=>{
-      if(!remote) return;
-      const meta = remote.meta || {};
-      const remoteHistory = remote.history || [];
-
-      // Merge meta (flat maps — last-write-wins is semantically correct)
-      if (meta.weights) {
-        setWWState(prev=>{
-          const merged={...prev,...meta.weights};
-          P.saveWeights(activeProfile,merged);
-          return merged;
-        });
-      }
-      if (meta.reps) {
-        setWRState(prev=>{
-          const merged={...prev,...meta.reps};
-          P.saveReps(activeProfile,merged);
-          return merged;
-        });
-      }
-      if (meta.streak?.count > P.getStreak(activeProfile).count){
-        P.saveStreak(activeProfile, meta.streak);
-        setStreak(meta.streak.count);
-      }
-      if (meta.programmeBlock?.number > PB.get().number){
-        PB.save(meta.programmeBlock);
-        setProgrammeBlock(meta.programmeBlock);
-      }
-
-      // Merge history (append-only — dedupe by id, sort by id)
-      if (remoteHistory.length) {
-        const merged = H.merge(H.get(activeProfile), remoteHistory);
-        H.save(activeProfile, merged);
-        setHistory(merged);
-      }
+    // BACKGROUND: Sync from blob, update state if remote has newer data
+    backgroundSync(activeProfile, {
+      onUpdate: ({ meta, history: remoteHistory }) => {
+        // Blob had newer data — update React state silently
+        if (meta.weights) setWWState(meta.weights);
+        if (meta.reps) setWRState(meta.reps);
+        if (meta.streak?.count) setStreak(meta.streak.count);
+        if (meta.programmeBlock) setProgrammeBlock(meta.programmeBlock);
+        if (remoteHistory?.length) setHistory(remoteHistory);
+      },
+      // Errors are swallowed — offline is fine, we have local data
     });
   },[activeProfile]);
 
@@ -559,6 +633,129 @@ export default function ForgeApp(){
   );
 }
 
+// ─── Taken Name Modal ──────────────────────────────────────────────────────────
+// Shows when user tries to claim a name that exists — offers passkey sign-in if available
+function TakenNameModal({ name, webAuthnSupported, onClose, onActivate, passkeyBusy, setPasskeyBusy, passkeyError, setPasskeyError }) {
+  const [hasProfilePasskey, setHasProfilePasskey] = useState(null); // null = checking
+  const [authSuccess, setAuthSuccess] = useState(false);
+
+  // Check if this profile has a passkey
+  useEffect(() => {
+    hasPasskey(name).then(setHasProfilePasskey);
+  }, [name]);
+
+  const handlePasskeySignIn = async () => {
+    setPasskeyBusy(true);
+    setPasskeyError(null);
+    try {
+      const result = await authenticatePasskey(name);
+      if (result?.verified) {
+        setAuthSuccess(true);
+        // Add profile locally and activate
+        P.add(name);
+        P.setActive(name);
+        // Trigger sync to pull down cloud data
+        setTimeout(() => window.location.reload(), 500);
+      } else {
+        setPasskeyError("Authentication cancelled");
+      }
+    } catch (e) {
+      setPasskeyError(e.message || "Passkey authentication failed");
+    }
+    setPasskeyBusy(false);
+  };
+
+  if (authSuccess) {
+    return (
+      <div style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center"}}>
+        <div style={{background:T.bg2,borderRadius:T.r.xl,padding:"40px 32px",textAlign:"center"}}>
+          <div style={{fontSize:48,marginBottom:16}}>✓</div>
+          <div style={{fontFamily:T.serif,fontSize:22,fontWeight:300,color:T.text1}}>
+            Welcome back, {name}
+          </div>
+          <p style={{fontSize:13,color:T.text3,marginTop:8}}>Loading your data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.coral}33`,animation:`slideUp 260ms ${T.ease}`,maxHeight:"92vh",overflowY:"auto",boxSizing:"border-box",position:"relative"}}>
+        <button onClick={onClose} aria-label="Close" style={{position:"absolute",top:14,right:14,background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,width:30,height:30,cursor:"pointer",color:T.text2,fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
+
+        <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:8,paddingRight:40}}>
+          Is this you?
+        </div>
+        <div style={{fontFamily:T.serif,fontSize:26,fontWeight:300,lineHeight:1.2,marginBottom:12}}>
+          {hasProfilePasskey === null ? "Checking..." : hasProfilePasskey ? "Sign in with passkey" : "Signing in on a new device"}
+        </div>
+
+        {/* If profile has passkey and WebAuthn is supported, show sign-in option */}
+        {webAuthnSupported && hasProfilePasskey && (
+          <>
+            <p style={{fontSize:13,color:T.text2,marginBottom:22,lineHeight:1.6}}>
+              <span style={{color:T.text1}}>{name}</span> is secured with a passkey. Use Face ID, Touch ID, or your device PIN to sign in.
+            </p>
+
+            {passkeyError && (
+              <div style={{marginBottom:16,padding:"10px 14px",borderRadius:T.r.md,background:`${T.rose}14`,fontSize:12,color:T.rose}}>
+                {passkeyError}
+              </div>
+            )}
+
+            <button
+              onClick={handlePasskeySignIn}
+              disabled={passkeyBusy}
+              style={{
+                width:"100%",
+                padding:"16px",
+                background:T.coral,
+                border:"none",
+                borderRadius:T.r.lg,
+                fontSize:16,
+                fontWeight:500,
+                color:T.bg0,
+                cursor:passkeyBusy?"default":"pointer",
+                opacity:passkeyBusy?0.6:1,
+                marginBottom:16,
+              }}
+            >
+              {passkeyBusy ? "Verifying..." : "Sign in with passkey"}
+            </button>
+
+            <p style={{fontSize:11,color:T.text4,textAlign:"center",lineHeight:1.5}}>
+              Lost access to your passkey? Contact support to recover your account.
+            </p>
+          </>
+        )}
+
+        {/* Fallback: no passkey or WebAuthn not supported */}
+        {(!webAuthnSupported || hasProfilePasskey === false) && hasProfilePasskey !== null && (
+          <>
+            <p style={{fontSize:13,color:T.text2,marginBottom:22,lineHeight:1.6}}>
+              <span style={{color:T.text1}}>{name}</span> is claimed but doesn&apos;t have a passkey set up. You&apos;ll need to wipe it from the original device to reclaim it here.
+            </p>
+
+            <div style={{padding:"14px 16px",borderRadius:T.r.md,background:`${T.gold}0E`,border:`1px solid ${T.gold}33`,marginBottom:22}}>
+              <div style={{fontSize:10,fontWeight:500,color:T.gold,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
+                What to do
+              </div>
+              <p style={{fontSize:13,color:T.text1,lineHeight:1.55}}>
+                On your old device: tap your name → <span style={{fontStyle:"italic",fontFamily:T.serif}}>Full wipe</span>. That releases the name so you can claim it here.
+              </p>
+            </div>
+
+            <button onClick={onClose} style={{width:"100%",padding:"14px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:16,fontWeight:300,color:T.text2}}>
+              Got it
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Profile Screen ────────────────────────────────────────────────────────────
 function ProfileScreen({existing,current,onActivate,onCancel}){
   const [name,setName]=useState("");
@@ -572,6 +769,28 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
   const latestQueryRef = useRef("");
   const {strength:s}=T;
 
+  // Passkey state
+  const [webAuthnSupported, setWebAuthnSupported] = useState(false);
+  const [showPasskeySetup, setShowPasskeySetup] = useState(false);
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const [passkeyError, setPasskeyError] = useState(null);
+  const [profileHasPasskey, setProfileHasPasskey] = useState({});
+  const [authToken, setAuthToken] = useState(null); // For authenticated destructive ops
+  const [needsPasskeyAuth, setNeedsPasskeyAuth] = useState(null); // Profile name requiring auth
+
+  // Check WebAuthn support on mount
+  useEffect(() => {
+    isPlatformAuthenticatorAvailable().then(setWebAuthnSupported);
+  }, []);
+
+  // Check if each profile has a passkey
+  useEffect(() => {
+    existing.forEach(async (profile) => {
+      const has = await hasPasskey(profile);
+      setProfileHasPasskey(prev => ({ ...prev, [profile]: has }));
+    });
+  }, [existing]);
+
   // Expanded wipe: opts.cloud === true also nukes cloud data via DELETE /api/sync.
   // opts.cloud === false only clears local storage (fast, offline-safe).
   const [wipeBusy,setWipeBusy]=useState(false);
@@ -580,9 +799,14 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
     setWipeError(null);
     setWipeBusy(true);
     if (cloud) {
-      const result = await blobDelete(n);
+      const result = await blobDelete(n, { authToken });
       if (!result.ok) {
         setWipeBusy(false);
+        if (result.requiresAuth) {
+          setConfirmWipe(null);
+          setNeedsPasskeyAuth(n);
+          return;
+        }
         setWipeError(result.error || "Couldn't reach the cloud. Try again?");
         return;
       }
@@ -594,7 +818,48 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
     if(P.getActive()===n){ LS.set("forge:active",null); }
     setWipeBusy(false);
     setConfirmWipe(null);
+    setAuthToken(null);
     window.location.reload();
+  };
+
+  // Handle passkey authentication for destructive ops
+  const handlePasskeyAuth = async () => {
+    if (!needsPasskeyAuth) return;
+    setPasskeyBusy(true);
+    setPasskeyError(null);
+    try {
+      const result = await authenticatePasskey(needsPasskeyAuth);
+      if (result?.verified && result?.authToken) {
+        setAuthToken(result.authToken);
+        setNeedsPasskeyAuth(null);
+        // Now retry the wipe with the token
+        setConfirmWipe(needsPasskeyAuth);
+      } else {
+        setPasskeyError("Authentication cancelled or failed");
+      }
+    } catch (e) {
+      setPasskeyError(e.message || "Passkey authentication failed");
+    }
+    setPasskeyBusy(false);
+  };
+
+  // Register a passkey for the current profile
+  const handleRegisterPasskey = async () => {
+    if (!current) return;
+    setPasskeyBusy(true);
+    setPasskeyError(null);
+    try {
+      const result = await registerPasskey(current);
+      if (result?.ok) {
+        setProfileHasPasskey(prev => ({ ...prev, [current]: true }));
+        setShowPasskeySetup(false);
+      } else {
+        setPasskeyError("Setup cancelled");
+      }
+    } catch (e) {
+      setPasskeyError(e.message || "Passkey setup failed");
+    }
+    setPasskeyBusy(false);
   };
 
   // Debounced availability check as user types
@@ -749,13 +1014,124 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
             No email. No phone.
           </div>
           <div style={{fontFamily:T.serif,fontSize:19,fontWeight:300,color:T.text1,lineHeight:1.35,marginBottom:6}}>
-            We don't want your <span style={{fontStyle:"italic",color:T.coral}}>starsign</span> either.
+            We don&apos;t want your <span style={{fontStyle:"italic",color:T.coral}}>starsign</span> either.
           </div>
           <p style={{fontSize:13,color:T.text3,lineHeight:1.6}}>
             Forge keeps your data yours. A name is all we need — it syncs your streak and weights across your devices. Nothing more.
           </p>
         </div>
       </Fade>
+
+      {/* Sync status card — shows cloud connection state */}
+      {current && (
+        <Fade d={240}>
+          <SyncStatusCard profile={current} />
+        </Fade>
+      )}
+
+      {/* Passkey setup card — only show if WebAuthn is supported and profile doesn't have one */}
+      {current && webAuthnSupported && !profileHasPasskey[current] && (
+        <Fade d={280}>
+          <div style={{marginTop:16,padding:"18px 20px",background:T.bg2,border:`1px solid ${T.sage}33`,borderRadius:T.r.lg}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:16}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:11,fontWeight:500,color:T.sage,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:8}}>
+                  Secure your profile
+                </div>
+                <div style={{fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text1,lineHeight:1.35,marginBottom:6}}>
+                  Add a passkey
+                </div>
+                <p style={{fontSize:12,color:T.text3,lineHeight:1.5}}>
+                  Use Face ID, Touch ID, or your device PIN to protect your data and sign in on other devices.
+                </p>
+              </div>
+              <button
+                onClick={handleRegisterPasskey}
+                disabled={passkeyBusy}
+                style={{
+                  padding:"10px 16px",
+                  background:T.sage,
+                  border:"none",
+                  borderRadius:T.r.md,
+                  fontSize:13,
+                  fontWeight:500,
+                  color:T.bg0,
+                  cursor:passkeyBusy?"default":"pointer",
+                  opacity:passkeyBusy?0.6:1,
+                  whiteSpace:"nowrap",
+                }}
+              >
+                {passkeyBusy ? "..." : "Set up"}
+              </button>
+            </div>
+            {passkeyError && (
+              <div style={{marginTop:12,padding:"8px 12px",borderRadius:T.r.sm,background:`${T.rose}14`,fontSize:11,color:T.rose}}>
+                {passkeyError}
+              </div>
+            )}
+          </div>
+        </Fade>
+      )}
+
+      {/* Passkey enabled badge */}
+      {current && profileHasPasskey[current] && (
+        <Fade d={280}>
+          <div style={{marginTop:16,padding:"14px 18px",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:8,height:8,borderRadius:"50%",background:T.sage}}/>
+            <div>
+              <div style={{fontSize:13,fontWeight:500,color:T.text1}}>Passkey enabled</div>
+              <div style={{fontSize:11,color:T.text3,marginTop:2}}>Your profile is secured with biometric auth</div>
+            </div>
+          </div>
+        </Fade>
+      )}
+
+      {/* Passkey auth required modal */}
+      {needsPasskeyAuth && (
+        <div onClick={()=>setNeedsPasskeyAuth(null)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:T.r.xl,padding:"32px 28px",width:"90%",maxWidth:340,textAlign:"center"}}>
+            <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:12}}>
+              Authentication required
+            </div>
+            <div style={{fontFamily:T.serif,fontSize:22,fontWeight:300,lineHeight:1.25,marginBottom:12}}>
+              Verify it&apos;s you
+            </div>
+            <p style={{fontSize:13,color:T.text2,marginBottom:24,lineHeight:1.55}}>
+              This profile has a passkey. Use Face ID, Touch ID, or your device PIN to continue.
+            </p>
+            {passkeyError && (
+              <div style={{marginBottom:16,padding:"10px 14px",borderRadius:T.r.md,background:`${T.rose}14`,fontSize:12,color:T.rose}}>
+                {passkeyError}
+              </div>
+            )}
+            <button
+              onClick={handlePasskeyAuth}
+              disabled={passkeyBusy}
+              style={{
+                width:"100%",
+                padding:"16px",
+                background:T.coral,
+                border:"none",
+                borderRadius:T.r.lg,
+                fontSize:16,
+                fontWeight:500,
+                color:T.bg0,
+                cursor:passkeyBusy?"default":"pointer",
+                opacity:passkeyBusy?0.6:1,
+                marginBottom:12,
+              }}
+            >
+              {passkeyBusy ? "Verifying..." : "Authenticate"}
+            </button>
+            <button
+              onClick={()=>{setNeedsPasskeyAuth(null);setPasskeyError(null);}}
+              style={{background:"none",border:"none",padding:"8px",fontSize:13,color:T.text3,cursor:"pointer"}}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       {confirmWipe&&(
         <div onClick={()=>!wipeBusy&&setConfirmWipe(null)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
@@ -809,46 +1185,18 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
         </div>
       )}
 
-      {/* Taken name → honest explainer. Proper cross-device sign-in ships
-          after May launch. Until then, give the user a clear next step. */}
+      {/* Taken name → passkey sign-in or fallback explainer */}
       {showTakenHelp && (
-        <div onClick={()=>setShowTakenHelp(false)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
-          <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.coral}33`,animation:`slideUp 260ms ${T.ease}`,maxHeight:"92vh",overflowY:"auto",boxSizing:"border-box",position:"relative"}}>
-            <button onClick={()=>setShowTakenHelp(false)} aria-label="Close" style={{position:"absolute",top:14,right:14,background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,width:30,height:30,cursor:"pointer",color:T.text2,fontSize:13,padding:0,display:"flex",alignItems:"center",justifyContent:"center"}}>✕</button>
-
-            <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:8,paddingRight:40}}>
-              Is this you?
-            </div>
-            <div style={{fontFamily:T.serif,fontSize:26,fontWeight:300,lineHeight:1.2,marginBottom:12}}>
-              Signing in on a <span style={{fontStyle:"italic",color:T.coral}}>new device</span>
-            </div>
-            <p style={{fontSize:13,color:T.text2,marginBottom:22,lineHeight:1.6}}>
-              Proper multi-device sign-in is shipping soon. Until then, <span style={{color:T.text1}}>{name.trim()}</span> is locked to the device where it was first claimed — this keeps your data yours and stops randoms from grabbing your name.
-            </p>
-
-            <div style={{padding:"14px 16px",borderRadius:T.r.md,background:`${T.gold}0E`,border:`1px solid ${T.gold}33`,marginBottom:22}}>
-              <div style={{fontSize:10,fontWeight:500,color:T.gold,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
-                What to do right now
-              </div>
-              <p style={{fontSize:13,color:T.text1,lineHeight:1.55}}>
-                On your old device: tap your name → <span style={{fontStyle:"italic",fontFamily:T.serif}}>Full wipe</span>. That releases the name and deletes all your cloud data — you'll be starting fresh here. If you want to keep your history, wait until device pairing ships.
-              </p>
-            </div>
-
-            <div style={{padding:"14px 16px",borderRadius:T.r.md,background:T.bg3,border:`1px solid ${T.bg4}`,marginBottom:22}}>
-              <div style={{fontSize:10,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
-                Coming next
-              </div>
-              <p style={{fontSize:13,color:T.text2,lineHeight:1.55}}>
-                Device pairing — scan a code on your old phone to sign in here, no wipe needed. On the roadmap, not yet live.
-              </p>
-            </div>
-
-            <button onClick={()=>setShowTakenHelp(false)} style={{width:"100%",padding:"14px",background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:16,fontWeight:300,color:T.text2}}>
-              Got it
-            </button>
-          </div>
-        </div>
+        <TakenNameModal
+          name={name.trim()}
+          webAuthnSupported={webAuthnSupported}
+          onClose={() => setShowTakenHelp(false)}
+          onActivate={onActivate}
+          passkeyBusy={passkeyBusy}
+          setPasskeyBusy={setPasskeyBusy}
+          passkeyError={passkeyError}
+          setPasskeyError={setPasskeyError}
+        />
       )}
     </div>
   );
@@ -913,8 +1261,18 @@ function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayD
           </div>
           <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:8}}>
             <StreakBadge rhythm={rhythm}/>
-            <button onClick={onProfile} style={{background:"none",border:"none",padding:0,cursor:"pointer",fontSize:11,color:T.text3,fontFamily:T.sans,fontWeight:500}}>
-              {profileName} ↗
+            <button onClick={onProfile} style={{background:"none",border:"none",padding:0,cursor:"pointer",fontSize:11,color:T.text3,fontFamily:T.sans,fontWeight:500,display:"flex",alignItems:"center",gap:6}}>
+              {profileName}
+              {syncState === "pulling" || syncState === "pushing" ? (
+                <span style={{
+                  width:6,height:6,borderRadius:"50%",
+                  background:T.sage,
+                  animation:"pulse 1s ease-in-out infinite",
+                }}/>
+              ) : syncState === "error" ? (
+                <span style={{width:6,height:6,borderRadius:"50%",background:T.coral,opacity:0.6}}/>
+              ) : null}
+              <span style={{marginLeft:2}}>↗</span>
             </button>
           </div>
         </div>

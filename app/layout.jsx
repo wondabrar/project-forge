@@ -2,6 +2,7 @@ import "./globals.css";
 import { Fraunces, DM_Sans } from "next/font/google";
 import { Analytics } from "@vercel/analytics/next";
 import { SpeedInsights } from "@vercel/speed-insights/next";
+import ErrorBoundary from "@/components/ErrorBoundary";
 
 const fraunces = Fraunces({
   subsets: ["latin"],
@@ -51,7 +52,9 @@ export default function RootLayout({ children }) {
         <link rel="apple-touch-icon" href="/icon-192.png" />
       </head>
       <body>
-        {children}
+        <ErrorBoundary>
+          {children}
+        </ErrorBoundary>
         <Analytics />
         <SpeedInsights />
       </body>

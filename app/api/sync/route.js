@@ -182,18 +182,69 @@ export async function POST(request) {
   }
 }
 
-// DELETE /api/sync?profile=Name
-// Nukes all cloud data for a profile: meta, history, the lot.
+// DELETE /api/sync?profile=Name&authToken=xxx
+// Nukes all cloud data for a profile: meta, history, credentials, the lot.
 // Releases the name so it can be claimed again.
 //
-// No auth yet — the threat model here is "you and your 10 friends". This
-// endpoint gets locked behind passkeys when cross-device auth ships.
+// If the profile has passkeys registered, requires a valid authToken from
+// successful passkey authentication. Profiles without passkeys can still
+// be deleted freely (legacy behaviour for migration).
 export async function DELETE(request) {
   try {
     const { searchParams } = new URL(request.url);
     const profile = searchParams.get("profile");
+    const authToken = searchParams.get("authToken");
     if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
 
+    // Check if this profile has passkeys
+    const credentialsPrefix = `forge/profiles/${encodeURIComponent(normalise(profile))}/credentials.json`;
+    const { blobs: credBlobs } = await list({ prefix: credentialsPrefix });
+    const hasPasskeys = credBlobs.length > 0;
+
+    // If passkeys exist, require auth token
+    if (hasPasskeys) {
+      if (!authToken) {
+        return NextResponse.json(
+          { error: "Passkey authentication required", requiresAuth: true },
+          { status: 401 }
+        );
+      }
+
+      // Verify auth token
+      const tokenKey = `forge/tokens/${authToken}`;
+      const tokenData = await readJson(tokenKey);
+      
+      if (!tokenData) {
+        return NextResponse.json(
+          { error: "Invalid or expired auth token", requiresAuth: true },
+          { status: 401 }
+        );
+      }
+
+      if (Date.now() > tokenData.expires) {
+        return NextResponse.json(
+          { error: "Auth token expired", requiresAuth: true },
+          { status: 401 }
+        );
+      }
+
+      if (tokenData.profile !== normalise(profile)) {
+        return NextResponse.json(
+          { error: "Auth token does not match profile" },
+          { status: 403 }
+        );
+      }
+
+      // Clean up the used token
+      try {
+        const { blobs: tokenBlobs } = await list({ prefix: tokenKey });
+        if (tokenBlobs.length) {
+          await del(tokenBlobs.map(b => b.url));
+        }
+      } catch {}
+    }
+
+    // Proceed with deletion
     const { blobs } = await list({ prefix: legacyPrefix(profile) });
     if (!blobs.length) {
       return NextResponse.json({ ok: true, deleted: 0 });
