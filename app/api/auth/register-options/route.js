@@ -45,9 +45,10 @@ export async function POST(request) {
       allowOverwrite: true,
     });
 
-    // Get the origin for RP ID
-    const origin = request.headers.get("origin") || request.headers.get("host");
-    const rpId = origin?.replace(/^https?:\/\//, "").split(":")[0] || "localhost";
+    // RP ID must be consistent between registration and authentication
+    // Use the actual domain in production, localhost in dev
+    const host = request.headers.get("host") || "";
+    const rpId = host.includes("localhost") ? "localhost" : "theforged.fit";
 
     return NextResponse.json({
       challenge,
