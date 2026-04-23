@@ -10,15 +10,22 @@ const normalise = (name) => String(name || "").trim().toLowerCase();
 // Note: Vercel Blob addRandomSuffix inserts BEFORE extension
 const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/credentials`;
 
-// Read JSON from private blob using list() + get()
-// Uses the same pattern as sync route - get() expects pathname, not URL
+// Read JSON from private blob using list() + get() (for blobs with random suffix)
 async function readJsonByPrefix(prefix) {
   try {
     const { blobs } = await list({ prefix });
     if (!blobs.length) return null;
     const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
-    // IMPORTANT: get() expects pathname, not url
-    const result = await get(latest.pathname, { access: "private" });
+    return await readJsonDirect(latest.pathname);
+  } catch {
+    return null;
+  }
+}
+
+// Read JSON directly by exact pathname (for blobs without random suffix like challenges)
+async function readJsonDirect(pathname) {
+  try {
+    const result = await get(pathname, { access: "private" });
     if (!result || result.statusCode !== 200 || !result.stream) return null;
     const reader = result.stream.getReader();
     const chunks = [];
@@ -60,9 +67,9 @@ export async function POST(request) {
       .update(normalise(profile))
       .digest("base64url");
 
-    // Retrieve and validate the challenge (challenges use addRandomSuffix: false so exact path works)
+    // Retrieve and validate the challenge (challenges use addRandomSuffix: false, so use direct read)
     const challengeKey = `forge/challenges/${userId}`;
-    const challengeData = await readJsonByPrefix(challengeKey);
+    const challengeData = await readJsonDirect(challengeKey);
     
     if (!challengeData) {
       return NextResponse.json({ error: "No pending authentication" }, { status: 400 });
