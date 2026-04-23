@@ -14,15 +14,21 @@ const credentialsPrefix = (name) => `forge/profiles/${encodeURIComponent(normali
 // Read JSON from blob using list() + head() for private blob access
 async function readJsonByPrefix(prefix) {
   try {
+    console.log("[v0] readJsonByPrefix v2 - prefix:", prefix);
     const { blobs } = await list({ prefix });
+    console.log("[v0] Found blobs:", blobs.length, blobs.map(b => b.pathname));
     if (!blobs.length) return null;
     const latest = blobs.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt))[0];
+    console.log("[v0] Calling head() on:", latest.url);
     // Use head() to get downloadUrl which includes auth token for private blobs
-    const { downloadUrl } = await head(latest.url);
-    const res = await fetch(downloadUrl);
+    const headResult = await head(latest.url);
+    console.log("[v0] head() result downloadUrl:", headResult.downloadUrl?.slice(0, 100));
+    const res = await fetch(headResult.downloadUrl);
+    console.log("[v0] Fetch response:", res.status, res.ok);
     if (!res.ok) return null;
     return await res.json();
-  } catch {
+  } catch (e) {
+    console.log("[v0] readJsonByPrefix error:", e.message);
     return null;
   }
 }
