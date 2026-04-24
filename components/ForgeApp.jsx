@@ -646,7 +646,6 @@ function TakenNameModal({ name, webAuthnSupported, onClose, onActivate, passkeyB
 
   // Check if this profile has a passkey
   useEffect(() => {
-    console.log("[v0] TakenNameModal checking passkey for:", name);
     hasPasskey(name).then(setHasProfilePasskey);
   }, [name]);
 
@@ -657,11 +656,13 @@ function TakenNameModal({ name, webAuthnSupported, onClose, onActivate, passkeyB
       const result = await authenticatePasskey(name);
       if (result?.verified) {
         setAuthSuccess(true);
-        // Add profile locally and activate
+        // Add profile locally and activate, then call onActivate to update React state
         P.add(name);
         P.setActive(name);
-        // Trigger sync to pull down cloud data
-        setTimeout(() => window.location.reload(), 500);
+        // Give user a moment to see success state, then activate properly
+        setTimeout(() => {
+          onActivate(name, { claim: false });
+        }, 800);
       } else {
         setPasskeyError("Authentication cancelled");
       }
@@ -789,17 +790,23 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
     isPlatformAuthenticatorAvailable().then(setWebAuthnSupported);
   }, []);
 
-  // Check if each profile has a passkey (including current profile on every render)
+  // Check if each profile has a passkey (only on mount, not when state changes)
+  // Using a ref to track which profiles we've already checked
+  const checkedProfilesRef = useRef(new Set());
   useEffect(() => {
-    // Check all existing profiles
+    // Check all existing profiles we haven't checked yet
     existing.forEach(async (profile) => {
+      if (checkedProfilesRef.current.has(profile)) return;
+      checkedProfilesRef.current.add(profile);
       const has = await hasPasskey(profile);
-      setProfileHasPasskey(prev => ({ ...prev, [profile]: has }));
+      // Only update if not already true (preserves local registration state)
+      setProfileHasPasskey(prev => prev[profile] === true ? prev : { ...prev, [profile]: has });
     });
-    // Also explicitly check current profile (handles navigation back to this screen)
-    if (current) {
+    // Also explicitly check current profile if not checked
+    if (current && !checkedProfilesRef.current.has(current)) {
+      checkedProfilesRef.current.add(current);
       hasPasskey(current).then(has => {
-        setProfileHasPasskey(prev => ({ ...prev, [current]: has }));
+        setProfileHasPasskey(prev => prev[current] === true ? prev : { ...prev, [current]: has });
       });
     }
   }, [existing, current]);
@@ -864,8 +871,13 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
     try {
       const result = await registerPasskey(current);
       if (result?.ok) {
+        // Update local state immediately - don't wait for async check
         setProfileHasPasskey(prev => ({ ...prev, [current]: true }));
         setShowPasskeySetup(false);
+        setPasskeyError(null);
+      } else if (result === null) {
+        // User cancelled - not an error, just close
+        setPasskeyError(null);
       } else {
         setPasskeyError("Setup cancelled");
       }
