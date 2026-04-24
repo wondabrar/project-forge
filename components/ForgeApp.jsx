@@ -14,7 +14,7 @@ import {
   enableAutoSync, disableAutoSync,
   checkProfileExists, claimProfile, blobDelete,
   roundPlate, applyRpe, weeksSince, weekKey,
-  newDraftLog, logSet, finaliseDraft, scaleForReadiness,
+  newDraftLog, logSet, finaliseDraft, scaleForReadiness, D,
 } from "@/lib/storage";
 import { T } from "@/lib/tokens";
 import {
@@ -31,6 +31,18 @@ function useFadeIn(d=0){
   useEffect(()=>{const t=setTimeout(()=>setV(true),d);return()=>clearTimeout(t);},[d]);
   return{opacity:v?1:0,transform:v?"translateY(0)":"translateY(10px)",
          transition:`opacity 260ms ${T.ease} ${d}ms,transform 260ms ${T.ease} ${d}ms`};
+}
+
+// Human-readable "X ago" — tuned for < 12h windows (draft expiry cutoff).
+function formatAgo(ms) {
+  if (!ms || ms < 0) return "just now";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return "just now";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} hr ago`;
+  return "a while ago";
 }
 
 // ─── ScrollDrum ────────────────────────────────────────────────────────────────
@@ -195,7 +207,10 @@ export default function ForgeApp(){
   const [activeProfile,setActiveProfileState]=useState(()=>typeof window!=="undefined"?P.getActive():null);
   const [showProfiles,setShowProfiles]=useState(false);
   const [streak,setStreak]=useState(0); // retained for compat — now derived from history, see useMemo below
-  const [screen,setScreen]=useState("home");
+  const [screen,setScreen]=useState(()=>{
+    if (typeof window === "undefined") return "home";
+    return LS.get("forge:onboarded", false) ? "home" : "onboarding";
+  });
   const [activeSessionIdx,setActiveSessionIdx]=useState(0);
   const [sessionSwaps,setSessionSwaps]=useState({});
   const [programmeBlock,setProgrammeBlock]=useState(()=>PB.get());
@@ -226,6 +241,8 @@ export default function ForgeApp(){
   const [showIosInstall,setShowIosInstall]=useState(false);
   // Sync status for subtle UI indicator
   const [syncState,setSyncState]=useState("idle"); // "idle" | "pulling" | "pushing" | "error"
+  // In-flight draft from a prior, interrupted session — shown as a resume card on home
+  const [pendingDraft,setPendingDraft]=useState(null); // { draft, ageMs, setCount } | null
 
   // Subscribe to sync status changes
   useEffect(() => {
@@ -277,13 +294,26 @@ export default function ForgeApp(){
     
     // Enable auto-sync on visibility change and online events
     enableAutoSync(activeProfile, onSyncUpdate);
+
+    // Check for an interrupted session — surfaces as a resume card on home
+    const interrupted = D.load(activeProfile);
+    setPendingDraft(interrupted);
+
     return () => disableAutoSync();
   },[activeProfile]);
 
   // Rest timer tick
   useEffect(()=>{
     if(!restActive) return;
-    if(restRemain<=0){setRestActive(false);return;}
+    if(restRemain<=0){
+      setRestActive(false);
+      // Haptic: Android fires; iOS Safari silently no-ops (returns false).
+      // Wrapped defensively — some browsers throw on invocation without
+      // a prior user gesture (shouldn't happen here since timer started
+      // from a button tap, but belt-and-braces).
+      try { if (typeof navigator !== "undefined" && navigator.vibrate) navigator.vibrate(200); } catch {}
+      return;
+    }
     const t=setTimeout(()=>setRestRemain(p=>p-1),1000);
     return()=>clearTimeout(t);
   },[restActive,restRemain]);
@@ -421,7 +451,10 @@ export default function ForgeApp(){
       reps: workingReps[ex.name] ?? ex.reps,
       rpe: rpe || null,
     });
-  }, [block, isSS, phase, sessionSwaps, workingWeights, workingReps, resolveExFn]);
+    // Persist the draft to LS so a force-quit or crash doesn't lose work.
+    // LS-only on purpose — blob isn't chatty-enough-reliable for this.
+    D.save(activeProfile, draftLogRef.current);
+  }, [block, isSS, phase, sessionSwaps, workingWeights, workingReps, resolveExFn, activeProfile]);
 
   const commitLog=useCallback((rpe)=>{
     // Use resolved exercises so RPE weight adjustments target the correct name
@@ -482,6 +515,9 @@ export default function ForgeApp(){
     setRestActive(false);setRestRemain(180);setRestTrigger(null);
     setSessionSwaps({});
     draftLogRef.current = null;
+    // If the user explicitly quits, the pending-draft card should go too.
+    D.clear(activeProfile);
+    setPendingDraft(null);
     setScreen("home");
   };
 
@@ -504,6 +540,9 @@ export default function ForgeApp(){
         setHistory(H.get(activeProfile));
         draftLogRef.current = null;
       }
+      // Completed session — drop the persisted draft.
+      D.clear(activeProfile);
+      setPendingDraft(null);
 
       // Anonymous completion signal — feeds Vercel Analytics funnel.
       // No PII, no free-text; enum-only dimensions.
@@ -545,6 +584,11 @@ export default function ForgeApp(){
   },[activeProfile]);
 
   if(!mounted) return null;
+
+  // Onboarding — first-time intro, shown before ProfileScreen
+  if(screen==="onboarding"){
+    return <OnboardingScreen onContinue={()=>{ LS.set("forge:onboarded", true); setScreen("home"); }}/>;
+  }
 
   if(!activeProfile||showProfiles){
     return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null}/>;
@@ -623,11 +667,67 @@ export default function ForgeApp(){
     setScreen("session");
   };
 
+  // Resume a draft from a previous, interrupted session.
+  // Jumps straight into session screen at the furthest block the user reached.
+  const handleResumeDraft = () => {
+    if (!pendingDraft) return;
+    const { draft } = pendingDraft;
+
+    // Rehydrate readiness / session selection from the saved draft so the
+    // working-set path resolves correctly.
+    const sessionKey = draft.session; // "strength-a" | ...
+    const idx = ["strength-a","strength-b","strength-c"].indexOf(sessionKey);
+    if (idx === -1) { handleDiscardDraft(); return; }
+
+    // Map back to the live SESSIONS definition. If programme has rotated since
+    // the draft was saved, the draft's block ids should still match by id.
+    const session = SESSIONS[idx];
+    if (!session) { handleDiscardDraft(); return; }
+
+    // Find which block they reached — the highest-indexed block with any sets.
+    let resumeBlockIdx = 0;
+    let setsOnCurrent  = 0;
+    for (let i = 0; i < session.blocks.length; i++) {
+      const saved = draft.blocks[session.blocks[i].id];
+      if (!saved) continue;
+      const setsHere = Object.values(saved.exercises || {})
+        .reduce((n, ex) => n + (ex.sets || []).length, 0);
+      if (setsHere > 0) {
+        resumeBlockIdx = i;
+        // For non-superset, sets-per-exercise == setNum-1 completed
+        // For superset, we log both A+B together, so pairs == setNum-1
+        const block = session.blocks[i];
+        const isSS = block.type === "superset" || block.type === "finisher";
+        const pairs = Math.max(
+          ...Object.values(saved.exercises || {}).map(ex => (ex.sets || []).length)
+        );
+        setsOnCurrent = isSS ? pairs : pairs; // both resolve the same way here
+      }
+    }
+
+    // Hydrate React state and re-attach the draft ref
+    draftLogRef.current = draft;
+    setActiveSessionIdx(idx);
+    setReadiness(draft.readiness);
+    setReadinessReason(draft.readinessReason);
+    setBlockIdx(resumeBlockIdx);
+    // Resume AT the next set (what they'd have logged next)
+    setSetNum(Math.min(setsOnCurrent + 1, session.blocks[resumeBlockIdx].sets));
+    setPhase("A");
+    setPendingDraft(null);
+    setScreen("session");
+  };
+
+  const handleDiscardDraft = () => {
+    D.clear(activeProfile);
+    setPendingDraft(null);
+  };
+
   const weeksOnBlock = weeksSince(programmeBlock.startDate);
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState}/>}
+      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft}/>}
       {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} reason={readinessReason} setReason={setReadinessReason} onStart={handleReadinessStart}/>}
       {screen==="session"     && <ErrorBoundary><SessionScreen {...sProps}/></ErrorBoundary>}
       {screen==="done"        && <ErrorBoundary><DoneScreen session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/></ErrorBoundary>}
@@ -758,6 +858,105 @@ function TakenNameModal({ name, webAuthnSupported, onClose, onActivate, passkeyB
             </button>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Onboarding Screen ────────────────────────────────────────────────────────
+// First-time intro. One screen, one CTA. Sets forge:onboarded on continue so
+// returning visitors skip straight to ProfileScreen or home.
+function OnboardingScreen({ onContinue }) {
+  const { strength: s } = T;
+  return (
+    <div style={{
+      background: T.bg0, minHeight: "100vh", maxWidth: 430, margin: "0 auto",
+      fontFamily: T.sans, color: T.text1, WebkitFontSmoothing: "antialiased",
+      padding: "72px 24px 48px", position: "relative", overflow: "hidden",
+      display: "flex", flexDirection: "column",
+    }}>
+      {/* Ambient glow */}
+      <div style={{
+        position: "absolute", top: -160, left: "50%", transform: "translateX(-50%)",
+        width: 500, height: 440,
+        background: `radial-gradient(ellipse, ${s.glow} 0%, transparent 65%)`,
+        pointerEvents: "none",
+      }}/>
+
+      <Fade d={0}>
+        <div style={{
+          fontSize: 11, fontWeight: 500, color: T.coral,
+          letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20,
+        }}>
+          Forge
+        </div>
+        <div style={{ fontFamily: T.serif, fontSize: 44, fontWeight: 300, lineHeight: 1.1, marginBottom: 16 }}>
+          Train with<br/><span style={{ fontStyle: "italic", color: T.coral }}>intention.</span>
+        </div>
+      </Fade>
+
+      <Fade d={120}>
+        <p style={{ fontSize: 15, color: T.text2, lineHeight: 1.65, marginBottom: 28 }}>
+          A lean strength tracker. Three sessions a week, the right lifts, and a timer that minds its own business.
+        </p>
+      </Fade>
+
+      {/* The three promises — feel like editorial callouts rather than feature bullets */}
+      <Fade d={200}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 32 }}>
+          <PromiseLine
+            accent={T.coral}
+            kicker="Strength"
+            body="Three sessions a week. Squat, hinge, push, pull. Your weights adapt to how you felt last time."
+          />
+          <PromiseLine
+            accent={T.steel}
+            kicker="Conditioning"
+            body="Zone 2 and HIIT days baked in. Because a strong heart matters as much as a strong back."
+          />
+          <PromiseLine
+            accent={T.sage}
+            kicker="Yours"
+            body="No accounts, no email, no bullshit. Your name, a passkey, and you're in."
+          />
+        </div>
+      </Fade>
+
+      <div style={{ flex: 1 }}/>
+
+      <Fade d={320}>
+        <button onClick={onContinue} style={{
+          width: "100%", padding: "18px 24px",
+          background: T.coral, border: "none", borderRadius: T.r.lg, cursor: "pointer",
+          fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
+          boxShadow: `0 12px 40px ${s.glow}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <span>Let's go</span>
+          <span style={{ fontSize: 18 }}>→</span>
+        </button>
+      </Fade>
+    </div>
+  );
+}
+
+function PromiseLine({ accent, kicker, body }) {
+  return (
+    <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+      <div style={{
+        width: 3, alignSelf: "stretch", minHeight: 48,
+        borderRadius: 2, background: accent, flexShrink: 0, marginTop: 2,
+      }}/>
+      <div>
+        <div style={{
+          fontSize: 10, fontWeight: 500, color: accent,
+          letterSpacing: "0.14em", textTransform: "uppercase", marginBottom: 5,
+        }}>
+          {kicker}
+        </div>
+        <div style={{ fontSize: 14, color: T.text1, lineHeight: 1.55 }}>
+          {body}
+        </div>
       </div>
     </div>
   );
@@ -1228,7 +1427,7 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
 }
 
 // ─── Home ─────────────────────��─────────��──────────────────────────────────────
-function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle"}){
+function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -1484,6 +1683,38 @@ function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayD
               <span style={{fontSize:16,color:accent.main}}>✓</span>
             </button>
           )}
+        </Fade>
+      )}
+
+      {/* Pick up where you left off — an interrupted session from within the
+          last 12 hours. Coral-tinted; the session is top-priority if it exists. */}
+      {pendingDraft && (
+        <Fade d={160}>
+          <div style={{margin:"20px 24px 0",padding:"18px 20px",background:`${T.coral}0E`,border:`1px solid ${T.coral}40`,borderRadius:T.r.lg,boxShadow:`0 8px 28px ${T.coral}10`}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12,marginBottom:14}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:11,fontWeight:500,color:T.coral,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
+                  Unfinished session
+                </div>
+                <div style={{fontFamily:T.serif,fontSize:20,fontWeight:300,color:T.text1,lineHeight:1.25}}>
+                  Pick up where you<br/><span style={{fontStyle:"italic",color:T.coral}}>left off.</span>
+                </div>
+                <div style={{fontSize:12,color:T.text3,marginTop:8,lineHeight:1.5}}>
+                  {pendingDraft.setCount} {pendingDraft.setCount === 1 ? "set" : "sets"} logged · {formatAgo(pendingDraft.ageMs)}
+                </div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={onResumeDraft}
+                style={{flex:1,padding:"12px 16px",background:T.coral,border:"none",borderRadius:T.r.md,cursor:"pointer",fontFamily:T.serif,fontSize:16,fontWeight:400,color:T.bg0}}>
+                Resume →
+              </button>
+              <button onClick={onDiscardDraft}
+                style={{padding:"12px 16px",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.md,cursor:"pointer",fontFamily:T.sans,fontSize:13,fontWeight:500,color:T.text3}}>
+                Discard
+              </button>
+            </div>
+          </div>
         </Fade>
       )}
 
