@@ -72,7 +72,7 @@ export default class ErrorBoundary extends Component {
               marginBottom: 32,
             }}
           >
-            The app hit an unexpected error. Your data is safe in the cloud.
+            The app hit an unexpected error. Your data's saved — don't worry.
           </p>
 
           <div style={{ display: "flex", gap: 12 }}>

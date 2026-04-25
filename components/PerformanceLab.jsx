@@ -102,7 +102,7 @@ function EmptyState() {
         Nothing to show<br/>yet.
       </div>
       <p style={{fontSize:13, color:T.text3, lineHeight:1.6, maxWidth:280, margin:"0 auto"}}>
-        Your first strength session will plot your estimated 1RM. By session three we'll start suggesting when to push and when to back off.
+        Your first session plots your estimated 1RM. After a few weeks we'll surface trends, volume, and stalls worth knowing about.
       </p>
     </div>
   );
