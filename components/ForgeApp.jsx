@@ -632,7 +632,12 @@ export default function ForgeApp(){
   }
 
   if(!activeProfile||showProfiles){
-  return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} onOpenBwEdit={()=>setBwEditOpen(true)}/>;
+  return (
+    <>
+      <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} onOpenBwEdit={()=>setBwEditOpen(true)}/>
+      <BodyweightEditModal open={bwEditOpen} onClose={()=>setBwEditOpen(false)} currentKg={bodyweight} onSave={updateBodyweight}/>
+    </>
+  );
   }
 
 const sProps={
