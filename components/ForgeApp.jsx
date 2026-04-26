@@ -698,7 +698,7 @@ export default function ForgeApp(){
   }
 
   if(!activeProfile||showProfiles){
-  return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} onOpenBwEdit={()=>setBwEditOpen(true)}/>;
+  return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} bwEditOpen={bwEditOpen} setBwEditOpen={setBwEditOpen} updateBodyweight={updateBodyweight}/>;
   }
 
 const sProps={
@@ -1149,7 +1149,7 @@ function PromiseLine({ accent, kicker, body }) {
 }
 
 // ─── Profile Screen ────────────────────────────────────────────────────────────
-function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,onOpenBwEdit}){
+function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwEditOpen=false,setBwEditOpen,updateBodyweight}){
   const [name,setName]=useState("");
   const [confirmWipe,setConfirmWipe]=useState(null);
   const [showTakenHelp,setShowTakenHelp]=useState(false);
@@ -1440,9 +1440,9 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,onO
       )}
 
       {/* Bodyweight row — tappable to edit */}
-      {current && onOpenBwEdit && (
+      {current && setBwEditOpen && (
         <Fade d={260}>
-          <div onClick={onOpenBwEdit}
+          <div onClick={()=>setBwEditOpen(true)}
             style={{marginTop:16,padding:"14px 18px",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 180ms ${T.ease}`}}>
             <div>
               <div style={{fontSize:13,fontWeight:500,color:T.text1}}>Bodyweight</div>
@@ -1631,11 +1631,14 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,onO
           setPasskeyError={setPasskeyError}
         />
       )}
+
+      {/* Bodyweight edit modal — rendered here so it works within ProfileScreen's early return */}
+      <BodyweightEditModal open={bwEditOpen} onClose={()=>setBwEditOpen(false)} currentKg={bodyweight} onSave={updateBodyweight}/>
     </div>
   );
 }
 
-// ─── Home ─────────────────────────────────────────────────────────────────────
+// ─── Home ──────────────────────────────────��──────────────────────────────────
 function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft,showBwCard=false,onOpenBwEdit,onDismissBwCard}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
@@ -2416,7 +2419,7 @@ function RotationSummaryModal({summary,onContinue}){
   );
 }
 
-// ─── Drum Edit ─────────────────────────────────────────────────────────────────
+// ─── Drum Edit ───────────────��─────────────────────────────────────────────────
 function DrumEditOverlay({target,workingWeights,setWW,workingReps,setWR,block,onClose}){
   const ex=block.type==="main"?block.ex:(target.exName===block.exA?.name?block.exA:block.exB);
   const initKg  =workingWeights[target.exName]??ex?.weight??0;
