@@ -8,13 +8,14 @@ import {
   DAY_CONFIG, DAY_NAMES, SWAP_DB, EQ_COLOUR,
 } from "@/lib/programme";
 import {
-  LS, P, PB, H, bumpStreak,
+  LS, P, PB, H, BW, bumpStreak,
   computeRhythm, detectRecoveryPattern,
   blobPush, flushPendingPushes, getLocalProfile, backgroundSync, SyncStatus,
   enableAutoSync, disableAutoSync,
   checkProfileExists, claimProfile, blobDelete,
   roundPlate, applyRpe, weeksSince, weekKey,
   newDraftLog, logSet, finaliseDraft, scaleForReadiness, D,
+  inferLoadType, LOAD_TYPES,
 } from "@/lib/storage";
 import { T } from "@/lib/tokens";
 import {
@@ -243,6 +244,12 @@ export default function ForgeApp(){
   const [syncState,setSyncState]=useState("idle"); // "idle" | "pulling" | "pushing" | "error"
   // In-flight draft from a prior, interrupted session — shown as a resume card on home
   const [pendingDraft,setPendingDraft]=useState(null); // { draft, ageMs, setCount } | null
+  // Bodyweight state — loaded from BW helper, used for bodyweight movements
+  const [bodyweight,setBodyweightState]=useState(null); // current BW in kg or null
+  const [bwIsStale,setBwIsStale]=useState(false); // true if BW > 14 days old or never set
+  const [bwCardDismissed,setBwCardDismissed]=useState(false); // in-memory dismiss for this session
+  const [bwEditOpen,setBwEditOpen]=useState(false); // BW edit modal state
+  const [bwPromptedThisSession,setBwPromptedThisSession]=useState(false); // only prompt once per session
 
   // Subscribe to sync status changes
   useEffect(() => {
@@ -298,6 +305,11 @@ export default function ForgeApp(){
     // Check for an interrupted session — surfaces as a resume card on home
     const interrupted = D.load(activeProfile);
     setPendingDraft(interrupted);
+
+    // Load bodyweight state
+    const bw = BW.getKg(activeProfile);
+    setBodyweightState(bw);
+    setBwIsStale(BW.isStale(activeProfile));
 
     return () => disableAutoSync();
   },[activeProfile]);
@@ -370,6 +382,13 @@ export default function ForgeApp(){
     });
   },[activeProfile]);
 
+  const updateBodyweight = useCallback((kg) => {
+    if (!activeProfile || !kg) return;
+    BW.set(activeProfile, kg);
+    setBodyweightState(kg);
+    setBwIsStale(false);
+  }, [activeProfile]);
+
   const activateProfile = async (name, { claim = false } = {}) => {
     const trimmed = String(name).trim();
     if (!trimmed) return { ok: false, reason: "empty" };
@@ -385,6 +404,14 @@ export default function ForgeApp(){
 
     P.add(trimmed);
     P.setActive(trimmed);
+
+    // Apply any pending BW from onboarding
+    const pendingBw = LS.get("forge:pendingBw", null);
+    if (pendingBw) {
+      BW.set(trimmed, pendingBw);
+      LS.remove("forge:pendingBw");
+    }
+
     setActiveProfileState(trimmed);
     setShowProfiles(false);
     return { ok: true };
@@ -440,6 +467,7 @@ export default function ForgeApp(){
     const swapPick = sessionSwaps[key];
     const swapped  = !!swapPick;
     const fromPool = EXERCISE_POOLS[key] ? key : null;
+    const loadType = ex.loadType || inferLoadType(ex.name);
     logSet(draftLogRef.current, {
       blockId: block.id,
       blockType: block.type,
@@ -447,6 +475,8 @@ export default function ForgeApp(){
       muscle: ex.muscle,
       swapped,
       fromPool,
+      loadType,
+      bodyweight: bodyweight,
       weight: workingWeights[ex.name] ?? ex.weight,
       reps: workingReps[ex.name] ?? ex.reps,
       rpe: rpe || null,
@@ -454,7 +484,14 @@ export default function ForgeApp(){
     // Persist the draft to LS so a force-quit or crash doesn't lose work.
     // LS-only on purpose — blob isn't chatty-enough-reliable for this.
     D.save(activeProfile, draftLogRef.current);
-  }, [block, isSS, phase, sessionSwaps, workingWeights, workingReps, resolveExFn, activeProfile]);
+    
+    // If this is a bodyweight movement and user hasn't set BW, prompt once per session
+    if (loadType !== "external" && bodyweight === null && !bwPromptedThisSession) {
+      setBwPromptedThisSession(true);
+      // Delay slightly so the RPE card shows first
+      setTimeout(() => setBwEditOpen(true), 600);
+    }
+  }, [block, isSS, phase, sessionSwaps, workingWeights, workingReps, resolveExFn, activeProfile, bodyweight, bwPromptedThisSession]);
 
   const commitLog=useCallback((rpe)=>{
     // Use resolved exercises so RPE weight adjustments target the correct name
@@ -585,25 +622,30 @@ export default function ForgeApp(){
 
   if(!mounted) return null;
 
-  // Onboarding — first-time intro, shown before ProfileScreen
+  // Onboarding — first-time intro + optional BW step, shown before ProfileScreen
   if(screen==="onboarding"){
-    return <OnboardingScreen onContinue={()=>{ LS.set("forge:onboarded", true); setScreen("home"); }}/>;
+    return <OnboardingScreen onContinue={(pendingBw)=>{
+      LS.set("forge:onboarded", true);
+      if (pendingBw) LS.set("forge:pendingBw", pendingBw);
+      setScreen("home");
+    }}/>;
   }
 
   if(!activeProfile||showProfiles){
-    return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null}/>;
+  return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} onOpenBwEdit={()=>setBwEditOpen(true)}/>;
   }
 
-  const sProps={
-    session:activeSession,
-    block,blockIdx,totalBlocks:activeSession.blocks.length,setNum,phase,isSS,
-    activeEx, resolvedExA, resolvedExB, resolvedEx,
-    swapKey,onSwap,
-    showVid,setShowVid,getW,getR,editTarget,setEditTarget,
-    workingWeights,setWW,workingReps,setWR,
-    awaitRpe,ssRoundDone,
-    restActive,restRemain,setRestActive,setRestRemain,
-    onCommit:commitLog,onLog:handleLog,onQuit:reset,
+const sProps={
+  session:activeSession,
+  block,blockIdx,totalBlocks:activeSession.blocks.length,setNum,phase,isSS,
+  activeEx, resolvedExA, resolvedExB, resolvedEx,
+  swapKey,onSwap,
+  showVid,setShowVid,getW,getR,editTarget,setEditTarget,
+  workingWeights,setWW,workingReps,setWR,
+  awaitRpe,ssRoundDone,
+  restActive,restRemain,setRestActive,setRestRemain,
+  onCommit:commitLog,onLog:handleLog,onQuit:reset,
+  bodyweight,
   };
 
   // Derive today's session index for HomeScreen
@@ -727,13 +769,14 @@ export default function ForgeApp(){
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft}/>}
+      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)}/>}
       {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} reason={readinessReason} setReason={setReadinessReason} onStart={handleReadinessStart}/>}
       {screen==="session"     && <ErrorBoundary><SessionScreen {...sProps}/></ErrorBoundary>}
       {screen==="done"        && <ErrorBoundary><DoneScreen session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/></ErrorBoundary>}
       {screen==="performance" && <ErrorBoundary><PerformanceLab history={history} onBack={()=>setScreen("home")}/></ErrorBoundary>}
       {rotationSummary        && <RotationSummaryModal summary={rotationSummary} onContinue={handleRotationContinue}/>}
       {showIosInstall         && <IosInstallOverlay onDismiss={()=>{ LS.set("forge:iosInstallDismissed", true); setShowIosInstall(false); }}/>}
+      <BodyweightEditModal open={bwEditOpen} onClose={()=>setBwEditOpen(false)} currentKg={bodyweight} onSave={updateBodyweight}/>
     </div>
   );
 }
@@ -864,10 +907,88 @@ function TakenNameModal({ name, webAuthnSupported, onClose, onActivate, passkeyB
 }
 
 // ─── Onboarding Screen ────────────────────────────────────────────────────────
-// First-time intro. One screen, one CTA. Sets forge:onboarded on continue so
+// First-time intro + optional BW step. Sets forge:onboarded on continue so
 // returning visitors skip straight to ProfileScreen or home.
 function OnboardingScreen({ onContinue }) {
   const { strength: s } = T;
+  const [step, setStep] = useState("intro"); // "intro" | "bodyweight"
+  const [pendingBw, setPendingBw] = useState(75); // default 75kg
+
+  // Intro step
+  if (step === "intro") {
+    return (
+      <div style={{
+        background: T.bg0, minHeight: "100vh", maxWidth: 430, margin: "0 auto",
+        fontFamily: T.sans, color: T.text1, WebkitFontSmoothing: "antialiased",
+        padding: "72px 24px 48px", position: "relative", overflow: "hidden",
+        display: "flex", flexDirection: "column",
+      }}>
+        {/* Ambient glow */}
+        <div style={{
+          position: "absolute", top: -160, left: "50%", transform: "translateX(-50%)",
+          width: 500, height: 440,
+          background: `radial-gradient(ellipse, ${s.glow} 0%, transparent 65%)`,
+          pointerEvents: "none",
+        }}/>
+
+        <Fade d={0}>
+          <div style={{
+            fontSize: 11, fontWeight: 500, color: T.coral,
+            letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20,
+          }}>
+            Forge
+          </div>
+          <div style={{ fontFamily: T.serif, fontSize: 44, fontWeight: 300, lineHeight: 1.1, marginBottom: 16 }}>
+            Train with<br/><span style={{ fontStyle: "italic", color: T.coral }}>intention.</span>
+          </div>
+        </Fade>
+
+        <Fade d={120}>
+          <p style={{ fontSize: 15, color: T.text2, lineHeight: 1.65, marginBottom: 28 }}>
+            A lean strength tracker. Three sessions a week, the right lifts, and a timer that minds its own business.
+          </p>
+        </Fade>
+
+        {/* The three promises — feel like editorial callouts rather than feature bullets */}
+        <Fade d={200}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 32 }}>
+            <PromiseLine
+              accent={T.coral}
+              kicker="Strength"
+              body="Three sessions a week. Squat, hinge, push, pull. Your weights adapt to how you felt last time."
+            />
+            <PromiseLine
+              accent={T.steel}
+              kicker="Conditioning"
+              body="Zone 2 and HIIT days baked in. Because a strong heart matters as much as a strong back."
+            />
+            <PromiseLine
+              accent={T.sage}
+              kicker="Yours"
+              body="No accounts, no email, no bullshit. Your name, a passkey, and you're in."
+            />
+          </div>
+        </Fade>
+
+        <div style={{ flex: 1 }}/>
+
+        <Fade d={320}>
+          <button onClick={() => setStep("bodyweight")} style={{
+            width: "100%", padding: "18px 24px",
+            background: T.coral, border: "none", borderRadius: T.r.lg, cursor: "pointer",
+            fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
+            boxShadow: `0 12px 40px ${s.glow}`,
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+          }}>
+            <span>Let's go</span>
+            <span style={{ fontSize: 18 }}>→</span>
+          </button>
+        </Fade>
+      </div>
+    );
+  }
+
+  // Bodyweight step
   return (
     <div style={{
       background: T.bg0, minHeight: "100vh", maxWidth: 430, margin: "0 auto",
@@ -888,53 +1009,52 @@ function OnboardingScreen({ onContinue }) {
           fontSize: 11, fontWeight: 500, color: T.coral,
           letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20,
         }}>
-          Forge
+          One more thing
         </div>
-        <div style={{ fontFamily: T.serif, fontSize: 44, fontWeight: 300, lineHeight: 1.1, marginBottom: 16 }}>
-          Train with<br/><span style={{ fontStyle: "italic", color: T.coral }}>intention.</span>
+        <div style={{ fontFamily: T.serif, fontSize: 36, fontWeight: 300, lineHeight: 1.15, marginBottom: 16 }}>
+          What do you weigh?
         </div>
       </Fade>
 
-      <Fade d={120}>
-        <p style={{ fontSize: 15, color: T.text2, lineHeight: 1.65, marginBottom: 28 }}>
-          A lean strength tracker. Three sessions a week, the right lifts, and a timer that minds its own business.
+      <Fade d={80}>
+        <p style={{ fontSize: 14, color: T.text2, lineHeight: 1.6, marginBottom: 32 }}>
+          Optional — but it lets us track bodyweight movements (pull-ups, dips, planks) properly.
         </p>
       </Fade>
 
-      {/* The three promises — feel like editorial callouts rather than feature bullets */}
-      <Fade d={200}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 32 }}>
-          <PromiseLine
-            accent={T.coral}
-            kicker="Strength"
-            body="Three sessions a week. Squat, hinge, push, pull. Your weights adapt to how you felt last time."
-          />
-          <PromiseLine
-            accent={T.steel}
-            kicker="Conditioning"
-            body="Zone 2 and HIIT days baked in. Because a strong heart matters as much as a strong back."
-          />
-          <PromiseLine
-            accent={T.sage}
-            kicker="Yours"
-            body="No accounts, no email, no bullshit. Your name, a passkey, and you're in."
+      <Fade d={140}>
+        <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", minHeight: 280 }}>
+          <ScrollDrum
+            value={pendingBw}
+            onChange={setPendingBw}
+            min={40}
+            max={200}
+            step={0.5}
+            label="kg"
           />
         </div>
       </Fade>
 
-      <div style={{ flex: 1 }}/>
-
-      <Fade d={320}>
-        <button onClick={onContinue} style={{
-          width: "100%", padding: "18px 24px",
-          background: T.coral, border: "none", borderRadius: T.r.lg, cursor: "pointer",
-          fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
-          boxShadow: `0 12px 40px ${s.glow}`,
-          display: "flex", alignItems: "center", justifyContent: "space-between",
-        }}>
-          <span>Let's go</span>
-          <span style={{ fontSize: 18 }}>→</span>
-        </button>
+      <Fade d={200}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <button onClick={() => onContinue(pendingBw)} style={{
+            width: "100%", padding: "18px 24px",
+            background: T.coral, border: "none", borderRadius: T.r.lg, cursor: "pointer",
+            fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
+            boxShadow: `0 12px 40px ${s.glow}`,
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+          }}>
+            <span>Save & continue</span>
+            <span style={{ fontSize: 18 }}>→</span>
+          </button>
+          <button onClick={() => onContinue(null)} style={{
+            width: "100%", padding: "14px 24px",
+            background: "transparent", border: "none", cursor: "pointer",
+            fontFamily: T.sans, fontSize: 14, fontWeight: 400, color: T.text3,
+          }}>
+            Skip
+          </button>
+        </div>
       </Fade>
     </div>
   );
@@ -963,7 +1083,7 @@ function PromiseLine({ accent, kicker, body }) {
 }
 
 // ─── Profile Screen ────────────────────────────────────────────────────────────
-function ProfileScreen({existing,current,onActivate,onCancel}){
+function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,onOpenBwEdit}){
   const [name,setName]=useState("");
   const [confirmWipe,setConfirmWipe]=useState(null);
   const [showTakenHelp,setShowTakenHelp]=useState(false);
@@ -1253,6 +1373,29 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
         </Fade>
       )}
 
+      {/* Bodyweight row — tappable to edit */}
+      {current && onOpenBwEdit && (
+        <Fade d={260}>
+          <div onClick={onOpenBwEdit}
+            style={{marginTop:16,padding:"14px 18px",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 180ms ${T.ease}`}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:500,color:T.text1}}>Bodyweight</div>
+              <div style={{fontSize:11,color:T.text3,marginTop:2}}>
+                {bodyweight ? (
+                  (() => {
+                    const bwData = BW.get(current);
+                    const daysAgo = bwData?.ageMs ? Math.floor(bwData.ageMs / 86400000) : null;
+                    const agoStr = daysAgo === 0 ? "today" : daysAgo === 1 ? "yesterday" : daysAgo !== null ? `${daysAgo} days ago` : "";
+                    return `${bodyweight} kg${agoStr ? ` · updated ${agoStr}` : ""}`;
+                  })()
+                ) : "Not set — add one ↗"}
+              </div>
+            </div>
+            <span style={{fontSize:14,color:T.text3}}>↗</span>
+          </div>
+        </Fade>
+      )}
+
       {/* Passkey setup card — only show if WebAuthn is supported and profile doesn't have one */}
       {current && webAuthnSupported && !profileHasPasskey[current] && (
         <Fade d={280}>
@@ -1426,8 +1569,8 @@ function ProfileScreen({existing,current,onActivate,onCancel}){
   );
 }
 
-// ─── Home ─────────────────────��─────────��──────────────────────────────────────
-function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft}){
+// ─── Home ─────────────────────────────────────────────────────────────────────
+function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft,showBwCard=false,onOpenBwEdit,onDismissBwCard}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -1718,6 +1861,30 @@ function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayD
         </Fade>
       )}
 
+      {/* BW re-prompt card — surfaces when bodyweight is stale (>14 days or never set) */}
+      {showBwCard && (
+        <Fade d={180}>
+          <div onClick={onOpenBwEdit}
+            style={{margin:"20px 24px 0",padding:"18px 20px",background:`${T.sage}0E`,border:`1px solid ${T.sage}40`,borderRadius:T.r.lg,cursor:"pointer"}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:11,fontWeight:500,color:T.sage,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
+                  Bodyweight
+                </div>
+                <div style={{fontFamily:T.serif,fontSize:18,fontWeight:300,color:T.text1,lineHeight:1.35,marginBottom:4}}>
+                  How much do you weigh today?
+                </div>
+                <div style={{fontSize:12,color:T.text3,lineHeight:1.5}}>
+                  Tap to update — keeps loaded pull-ups and dips honest.
+                </div>
+              </div>
+              <button onClick={(e)=>{e.stopPropagation();onDismissBwCard();}} aria-label="Dismiss"
+                style={{flexShrink:0,background:"none",border:"none",padding:"4px 8px",cursor:"pointer",fontSize:14,color:T.text3,fontFamily:T.sans}}>✕</button>
+            </div>
+          </div>
+        </Fade>
+      )}
+
       {/* Honest recovery nudge — surfaces when the last 2 sessions were cooked.
           Non-pushy. Dismisses in-memory for this session. */}
       {recoveryNudge && (
@@ -1894,8 +2061,8 @@ function RpeCard({onPick,label="How was that set?"}){
   );
 }
 
-// ─── Session ───────────────────────────��───────────────────────────────────────
-function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,resolvedExA,resolvedExB,resolvedEx,swapKey,onSwap,showVid,setShowVid,getW,getR,editTarget,setEditTarget,workingWeights,setWW,workingReps,setWR,awaitRpe,ssRoundDone,restActive,restRemain,setRestActive,setRestRemain,onCommit,onLog,onQuit}){
+// ─── Session ──────────────────────────────────────────────────────────────────
+function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,resolvedExA,resolvedExB,resolvedEx,swapKey,onSwap,showVid,setShowVid,getW,getR,editTarget,setEditTarget,workingWeights,setWW,workingReps,setWR,awaitRpe,ssRoundDone,restActive,restRemain,setRestActive,setRestRemain,onCommit,onLog,onQuit,bodyweight}){
   const {strength:s}=T;
   const [swapEx,setSwapEx]=useState(null);
   const partnerEx=isSS?(phase==="A"?resolvedExB:resolvedExA):null;
@@ -1908,6 +2075,17 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
   const restMins =Math.floor(restRemain/60),restSecs=restRemain%60;
   const restStr  =`${restMins}:${String(restSecs).padStart(2,"0")}`;
   const blocking =awaitRpe||ssRoundDone;
+  
+  // Load type handling for bodyweight movements
+  const loadType = activeEx?.loadType || inferLoadType(activeEx?.name);
+  const showWeightPicker = loadType !== "bodyweight";
+  const weightLabel = loadType === "loaded_bodyweight" ? "+ kg"
+                    : loadType === "assisted_bodyweight" ? "− kg"
+                    : "kg";
+  const loadTypeSubtitle = loadType === "bodyweight" ? "Bodyweight"
+                         : loadType === "loaded_bodyweight" ? "Added load"
+                         : loadType === "assisted_bodyweight" ? "Band assist"
+                         : null;
 
   return (
     <div style={{minHeight:"100vh",position:"relative",overflow:"hidden",paddingBottom:40}}>
@@ -1948,15 +2126,20 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
         </div>
       </div>
       <div style={{padding:"22px 20px 0"}}>
-        <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:10}}>Set {setNum} of {block.sets}</div>
-        {currentW!==null&&(
-          <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4,cursor:"pointer",userSelect:"none"}} onClick={()=>setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx)})}>
+        <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:10}}>
+          <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.12em",textTransform:"uppercase"}}>Set {setNum} of {block.sets}</div>
+          {loadTypeSubtitle && (
+            <span style={{fontSize:10,color:T.sage,fontWeight:500,letterSpacing:"0.08em",textTransform:"uppercase"}}>{loadTypeSubtitle}</span>
+          )}
+        </div>
+        {showWeightPicker && currentW!==null&&(
+          <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4,cursor:"pointer",userSelect:"none"}} onClick={()=>setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx),loadType})}>
             <span style={{fontFamily:T.serif,fontSize:80,fontWeight:300,color:T.text1,lineHeight:1,letterSpacing:"-0.02em"}}>{currentW}</span>
-            <span style={{fontFamily:T.serif,fontSize:22,fontWeight:300,color:T.text3,marginBottom:8}}>kg</span>
+            <span style={{fontFamily:T.serif,fontSize:22,fontWeight:300,color:T.text3,marginBottom:8}}>{weightLabel}</span>
             <span style={{fontSize:11,color:T.text3,marginBottom:10,marginLeft:4}}>↕</span>
           </div>
         )}
-        <div style={{display:"flex",alignItems:"baseline",gap:6,cursor:"pointer",userSelect:"none"}} onClick={()=>setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx)})}>
+        <div style={{display:"flex",alignItems:"baseline",gap:6,cursor:"pointer",userSelect:"none"}} onClick={()=>setEditTarget({exName:activeEx.name,currentKg:showWeightPicker?currentW:null,currentReps:getR(activeEx),loadType})}>
           <span style={{fontFamily:T.serif,fontSize:48,fontWeight:400,color:T.coral,lineHeight:1,fontStyle:"italic"}}>{getR(activeEx)}</span>
           <span style={{fontSize:14,color:T.text3,marginBottom:4}}>reps</span>
           <span style={{fontSize:11,color:T.text3,marginBottom:6,marginLeft:4}}>↕</span>
@@ -2195,6 +2378,50 @@ function DrumEditOverlay({target,workingWeights,setWW,workingReps,setWR,block,on
         }} style={{marginTop:24,width:"100%",padding:"16px",background:T.coral,border:"none",borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:18,fontWeight:400,color:T.bg0,boxShadow:`0 8px 28px ${T.strength.glow}`}}>
           Confirm →
         </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Bodyweight Edit Modal ─────────────────────────────────────────────────────
+// Reusable bottom-sheet modal for editing bodyweight. Triggered from:
+// - Home screen BW re-prompt card
+// - Profile settings BW row
+// - Post-session BW prompt after logging bodyweight movements
+function BodyweightEditModal({open,onClose,currentKg,onSave}){
+  const [kg,setKg]=useState(currentKg || 75);
+  
+  // Update local state when modal opens with new value
+  useEffect(()=>{
+    if(open) setKg(currentKg || 75);
+  },[open, currentKg]);
+  
+  if(!open) return null;
+  
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"28px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.bg3}`,animation:`slideUp 260ms ${T.ease}`}}>
+        <style>{`@keyframes slideUp{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
+        <div style={{marginBottom:24}}>
+          <div style={{fontFamily:T.serif,fontSize:24,fontWeight:300,lineHeight:1.15,marginBottom:8}}>
+            Your bodyweight
+          </div>
+          <div style={{fontSize:13,color:T.text3,lineHeight:1.5}}>
+            Used to track loaded pull-ups, dips, and other bodyweight movements properly. We don't share this anywhere.
+          </div>
+        </div>
+        <div style={{display:"flex",justifyContent:"center",marginBottom:24}}>
+          <ScrollDrum value={kg} onChange={setKg} step={0.5} min={40} max={200} label="kg"/>
+        </div>
+        <div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <button onClick={()=>{onSave(kg);onClose();}} style={{width:"100%",padding:"16px",background:T.coral,border:"none",borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:18,fontWeight:400,color:T.bg0,boxShadow:`0 8px 28px ${T.strength.glow}`,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            <span>Save</span>
+            <span style={{fontSize:16}}>→</span>
+          </button>
+          <button onClick={onClose} style={{width:"100%",padding:"12px",background:"none",border:"none",cursor:"pointer",fontFamily:T.sans,fontSize:14,color:T.text3}}>
+            Cancel
+          </button>
+        </div>
       </div>
     </div>
   );
