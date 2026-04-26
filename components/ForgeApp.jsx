@@ -14,10 +14,16 @@ import {
   enableAutoSync, disableAutoSync,
   checkProfileExists, claimProfile, blobDelete,
   roundPlate, applyRpe, weeksSince, weekKey,
-  newDraftLog, logSet, finaliseDraft, scaleForReadiness, D,
+  newDraftLog, logSet, finaliseDraft, scaleForReadiness, D, TS,
   inferLoadType, LOAD_TYPES,
 } from "@/lib/storage";
 import { T } from "@/lib/tokens";
+import {
+  computeNextPrescription,
+  updateLiftStateFromSession,
+  updateMuscleAnchorFromSession,
+} from "@/lib/progression";
+import { getLiftProfile } from "@/lib/lift-translations";
 import {
   isWebAuthnSupported, isPlatformAuthenticatorAvailable,
   registerPasskey, authenticatePasskey, hasPasskey,
@@ -499,20 +505,14 @@ export default function ForgeApp(){
       ? [resolveExFn(block.id,"A",block.exA), resolveExFn(block.id,"B",block.exB)]
       : [resolveExFn(block.id, null, block.ex)];
 
-    // 1. Record the actual sets performed in the draft log BEFORE applying RPE
-    //    so history captures the weight used, not the weight suggested next time.
+    // Record the actual sets performed in the draft log. Per-block weight
+    // adjustments via applyRpe used to fire here, but Phase 2 moves all
+    // progression decisions to the session-finalise hook (better — engine
+    // sees the entire session's performance against prescribed targets,
+    // not just one block).
     exes.forEach(ex => pushSetToDraft(ex, rpe));
 
-    // 2. Apply RPE-driven weight adjustments for next session's working weight
-    const updates={};
-    exes.forEach(ex=>{
-      if(!ex) return;
-      const w=workingWeights[ex.name]??ex.weight;
-      if(w!==null&&w!==undefined){const n=applyRpe(w,rpe);if(n!==w) updates[ex.name]=n;}
-    });
-    if(Object.keys(updates).length) setWW(p=>({...p,...updates}));
-
-    // 3. Advance block / set / screen
+    // Advance block / set / screen
     if(setNum>=block.sets){
       if(blockIdx<activeSession.blocks.length-1){setBlockIdx(p=>p+1);setSetNum(1);setPhase("A");}
       else setScreen("done");
@@ -520,7 +520,7 @@ export default function ForgeApp(){
     setRestTrigger({id:Date.now(),duration:block.rest});
     setSsRoundDone(false);
     setAwaitRpe(false);
-  },[block,blockIdx,isSS,setNum,workingWeights,setWW,activeSession,resolveExFn,pushSetToDraft]);
+  },[block,blockIdx,isSS,setNum,activeSession,resolveExFn,pushSetToDraft]);
 
   const handleLog=useCallback(()=>{
     if(isSS){
@@ -581,6 +581,72 @@ export default function ForgeApp(){
       D.clear(activeProfile);
       setPendingDraft(null);
 
+      // ─── Phase 2: progression engine ──────────────────────────────────
+      // For every exercise in the just-finished session, compute next
+      // prescription, update lift state + muscle anchors, and write the
+      // new working weight back to setWW so future sessions pick it up.
+      // Engine is silent — user sees a quietly smarter app.
+      if (sessionRecord) {
+        try {
+          const fullHistory = H.get(activeProfile); // already includes the new record
+          const trainingState = TS.get(activeProfile);
+          const wwUpdates = {};
+
+          for (const block of sessionRecord.blocks || []) {
+            for (const ex of block.exercises || []) {
+              const liftState = trainingState.lifts?.[ex.name] || null;
+              const profile = getLiftProfile(ex.name);
+              const anchorMuscle = profile.primaryMuscle;
+              const muscleAnchor = anchorMuscle
+                ? trainingState.muscleAnchors?.[anchorMuscle] || null
+                : null;
+
+              const prescription = computeNextPrescription({
+                liftName: ex.name,
+                history: fullHistory,
+                liftState,
+                muscleAnchor,
+                context: {
+                  readiness: sessionRecord.readiness,
+                  currentWeight: workingWeights[ex.name] ?? ex.sets?.[0]?.weight ?? null,
+                },
+              });
+
+              // Update working weights for next session — only when engine
+              // returned a numeric weight (BW lifts return null).
+              if (prescription.weight !== null && prescription.weight !== undefined) {
+                wwUpdates[ex.name] = prescription.weight;
+              }
+
+              // Persist updated lift state
+              const newLiftState = updateLiftStateFromSession(
+                liftState,
+                sessionRecord,
+                ex,
+                prescription,
+              );
+              TS.updateLift(activeProfile, ex.name, newLiftState);
+
+              // Update muscle anchor — only for loaded lifts with a known muscle group.
+              // Anchor tracks the strongest implied muscle-group strength across all lifts.
+              if (anchorMuscle && profile.progressesByLoad) {
+                const currentAnchor = TS.get(activeProfile).muscleAnchors?.[anchorMuscle] || null;
+                const newAnchor = updateMuscleAnchorFromSession(currentAnchor, sessionRecord, ex);
+                if (newAnchor) TS.updateMuscleAnchor(activeProfile, anchorMuscle, newAnchor);
+              }
+            }
+          }
+
+          if (Object.keys(wwUpdates).length) {
+            setWW(p => ({ ...p, ...wwUpdates }));
+          }
+        } catch (e) {
+          // Engine errors must never block session completion.
+          console.error("[forge:progression]", e);
+        }
+      }
+      // ──────────────────────────────────────────────────────────────────
+
       // Anonymous completion signal — feeds Vercel Analytics funnel.
       // No PII, no free-text; enum-only dimensions.
       try {
@@ -632,12 +698,7 @@ export default function ForgeApp(){
   }
 
   if(!activeProfile||showProfiles){
-  return (
-    <>
-      <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} onOpenBwEdit={()=>setBwEditOpen(true)}/>
-      <BodyweightEditModal open={bwEditOpen} onClose={()=>setBwEditOpen(false)} currentKg={bodyweight} onSave={updateBodyweight}/>
-    </>
-  );
+  return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} onOpenBwEdit={()=>setBwEditOpen(true)}/>;
   }
 
 const sProps={
