@@ -410,14 +410,6 @@ export default function ForgeApp(){
 
     P.add(trimmed);
     P.setActive(trimmed);
-
-    // Apply any pending BW from onboarding
-    const pendingBw = LS.get("forge:pendingBw", null);
-    if (pendingBw) {
-      BW.set(trimmed, pendingBw);
-      LS.remove("forge:pendingBw");
-    }
-
     setActiveProfileState(trimmed);
     setShowProfiles(false);
     return { ok: true };
@@ -688,11 +680,10 @@ export default function ForgeApp(){
 
   if(!mounted) return null;
 
-  // Onboarding — first-time intro + optional BW step, shown before ProfileScreen
+  // Onboarding — first-time intro, shown before ProfileScreen
   if(screen==="onboarding"){
-    return <OnboardingScreen onContinue={(pendingBw)=>{
+    return <OnboardingScreen onContinue={()=>{
       LS.set("forge:onboarded", true);
-      if (pendingBw) LS.set("forge:pendingBw", pendingBw);
       setScreen("home");
     }}/>;
   }
@@ -973,88 +964,11 @@ function TakenNameModal({ name, webAuthnSupported, onClose, onActivate, passkeyB
 }
 
 // ─── Onboarding Screen ────────────────────────────────────────────────────────
-// First-time intro + optional BW step. Sets forge:onboarded on continue so
-// returning visitors skip straight to ProfileScreen or home.
+// First-time intro. Sets forge:onboarded on continue so returning visitors
+// skip straight to ProfileScreen or home. BW is collected after name entry.
 function OnboardingScreen({ onContinue }) {
   const { strength: s } = T;
-  const [step, setStep] = useState("intro"); // "intro" | "bodyweight"
-  const [pendingBw, setPendingBw] = useState(75); // default 75kg
 
-  // Intro step
-  if (step === "intro") {
-    return (
-      <div style={{
-        background: T.bg0, minHeight: "100vh", maxWidth: 430, margin: "0 auto",
-        fontFamily: T.sans, color: T.text1, WebkitFontSmoothing: "antialiased",
-        padding: "72px 24px 48px", position: "relative", overflow: "hidden",
-        display: "flex", flexDirection: "column",
-      }}>
-        {/* Ambient glow */}
-        <div style={{
-          position: "absolute", top: -160, left: "50%", transform: "translateX(-50%)",
-          width: 500, height: 440,
-          background: `radial-gradient(ellipse, ${s.glow} 0%, transparent 65%)`,
-          pointerEvents: "none",
-        }}/>
-
-        <Fade d={0}>
-          <div style={{
-            fontSize: 11, fontWeight: 500, color: T.coral,
-            letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20,
-          }}>
-            Forge
-          </div>
-          <div style={{ fontFamily: T.serif, fontSize: 44, fontWeight: 300, lineHeight: 1.1, marginBottom: 16 }}>
-            Train with<br/><span style={{ fontStyle: "italic", color: T.coral }}>intention.</span>
-          </div>
-        </Fade>
-
-        <Fade d={120}>
-          <p style={{ fontSize: 15, color: T.text2, lineHeight: 1.65, marginBottom: 28 }}>
-            A lean strength tracker. Three sessions a week, the right lifts, and a timer that minds its own business.
-          </p>
-        </Fade>
-
-        {/* The three promises — feel like editorial callouts rather than feature bullets */}
-        <Fade d={200}>
-          <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 32 }}>
-            <PromiseLine
-              accent={T.coral}
-              kicker="Strength"
-              body="Three sessions a week. Squat, hinge, push, pull. Your weights adapt to how you felt last time."
-            />
-            <PromiseLine
-              accent={T.steel}
-              kicker="Conditioning"
-              body="Zone 2 and HIIT days baked in. Because a strong heart matters as much as a strong back."
-            />
-            <PromiseLine
-              accent={T.sage}
-              kicker="Yours"
-              body="No accounts, no email, no bullshit. Your name, a passkey, and you're in."
-            />
-          </div>
-        </Fade>
-
-        <div style={{ flex: 1 }}/>
-
-        <Fade d={320}>
-          <button onClick={() => setStep("bodyweight")} style={{
-            width: "100%", padding: "18px 24px",
-            background: T.coral, border: "none", borderRadius: T.r.lg, cursor: "pointer",
-            fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
-            boxShadow: `0 12px 40px ${s.glow}`,
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-          }}>
-            <span>Let's go</span>
-            <span style={{ fontSize: 18 }}>→</span>
-          </button>
-        </Fade>
-      </div>
-    );
-  }
-
-  // Bodyweight step
   return (
     <div style={{
       background: T.bg0, minHeight: "100vh", maxWidth: 430, margin: "0 auto",
@@ -1075,52 +989,53 @@ function OnboardingScreen({ onContinue }) {
           fontSize: 11, fontWeight: 500, color: T.coral,
           letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20,
         }}>
-          One more thing
+          Forge
         </div>
-        <div style={{ fontFamily: T.serif, fontSize: 36, fontWeight: 300, lineHeight: 1.15, marginBottom: 16 }}>
-          What do you weigh?
+        <div style={{ fontFamily: T.serif, fontSize: 44, fontWeight: 300, lineHeight: 1.1, marginBottom: 16 }}>
+          Train with<br/><span style={{ fontStyle: "italic", color: T.coral }}>intention.</span>
         </div>
       </Fade>
 
-      <Fade d={80}>
-        <p style={{ fontSize: 14, color: T.text2, lineHeight: 1.6, marginBottom: 32 }}>
-          Optional — but it lets us track bodyweight movements (pull-ups, dips, planks) properly.
+      <Fade d={120}>
+        <p style={{ fontSize: 15, color: T.text2, lineHeight: 1.65, marginBottom: 28 }}>
+          A lean strength tracker. Three sessions a week, the right lifts, and a timer that minds its own business.
         </p>
       </Fade>
 
-      <Fade d={140}>
-        <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", minHeight: 280 }}>
-          <ScrollDrum
-            value={pendingBw}
-            onChange={setPendingBw}
-            min={40}
-            max={200}
-            step={0.5}
-            label="kg"
+      {/* The three promises — feel like editorial callouts rather than feature bullets */}
+      <Fade d={200}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 18, marginBottom: 32 }}>
+          <PromiseLine
+            accent={T.coral}
+            kicker="Strength"
+            body="Three sessions a week. Squat, hinge, push, pull. Your weights adapt to how you felt last time."
+          />
+          <PromiseLine
+            accent={T.steel}
+            kicker="Conditioning"
+            body="Zone 2 and HIIT days baked in. Because a strong heart matters as much as a strong back."
+          />
+          <PromiseLine
+            accent={T.sage}
+            kicker="Yours"
+            body="No accounts, no email, no bullshit. Your name, a passkey, and you're in."
           />
         </div>
       </Fade>
 
-      <Fade d={200}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <button onClick={() => onContinue(pendingBw)} style={{
-            width: "100%", padding: "18px 24px",
-            background: T.coral, border: "none", borderRadius: T.r.lg, cursor: "pointer",
-            fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
-            boxShadow: `0 12px 40px ${s.glow}`,
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-          }}>
-            <span>Save & continue</span>
-            <span style={{ fontSize: 18 }}>→</span>
-          </button>
-          <button onClick={() => onContinue(null)} style={{
-            width: "100%", padding: "14px 24px",
-            background: "transparent", border: "none", cursor: "pointer",
-            fontFamily: T.sans, fontSize: 14, fontWeight: 400, color: T.text3,
-          }}>
-            Skip
-          </button>
-        </div>
+      <div style={{ flex: 1 }}/>
+
+      <Fade d={320}>
+        <button onClick={() => onContinue()} style={{
+          width: "100%", padding: "18px 24px",
+          background: T.coral, border: "none", borderRadius: T.r.lg, cursor: "pointer",
+          fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
+          boxShadow: `0 12px 40px ${s.glow}`,
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+        }}>
+          <span>Let's go</span>
+          <span style={{ fontSize: 18 }}>→</span>
+        </button>
       </Fade>
     </div>
   );
@@ -1160,6 +1075,11 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
   const checkTimerRef = useRef(null);
   const latestQueryRef = useRef("");
   const {strength:s}=T;
+
+  // Post-claim BW step (only for new users with no existing profiles)
+  const [showBwStep, setShowBwStep] = useState(false);
+  const [pendingBw, setPendingBw] = useState(75);
+  const [claimedName, setClaimedName] = useState(null);
 
   // Passkey state
   const [webAuthnSupported, setWebAuthnSupported] = useState(false);
@@ -1317,6 +1237,12 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
       } else {
         setSubmitError("Network hiccup. Try again?");
       }
+    } else {
+      // Success! For first-time users (no existing profiles), show BW step
+      if (existing.length === 0 && !isLocalProfile) {
+        setClaimedName(trimmed);
+        setShowBwStep(true);
+      }
     }
   };
 
@@ -1329,6 +1255,83 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
     return null;
   };
   const pip = availabilityPip();
+
+  // Post-claim BW step for first-time users
+  if (showBwStep) {
+    const handleBwSave = () => {
+      if (claimedName && updateBodyweight) {
+        updateBodyweight(pendingBw);
+      }
+      setShowBwStep(false);
+    };
+    const handleBwSkip = () => {
+      setShowBwStep(false);
+    };
+
+    return (
+      <div style={{
+        background: T.bg0, minHeight: "100vh", maxWidth: 430, margin: "0 auto",
+        fontFamily: T.sans, color: T.text1, WebkitFontSmoothing: "antialiased",
+        padding: "72px 24px 48px", position: "relative", overflow: "hidden",
+        display: "flex", flexDirection: "column",
+      }}>
+        <div style={{position:"absolute",top:-160,left:"50%",transform:"translateX(-50%)",width:500,height:440,background:`radial-gradient(ellipse,${s.glow} 0%,transparent 65%)`,pointerEvents:"none"}}/>
+
+        <Fade d={0}>
+          <div style={{
+            fontSize: 11, fontWeight: 500, color: T.coral,
+            letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20,
+          }}>
+            One more thing
+          </div>
+          <div style={{ fontFamily: T.serif, fontSize: 36, fontWeight: 300, lineHeight: 1.15, marginBottom: 16 }}>
+            What do you weigh?
+          </div>
+        </Fade>
+
+        <Fade d={80}>
+          <p style={{ fontSize: 14, color: T.text2, lineHeight: 1.6, marginBottom: 32 }}>
+            Optional — but it lets us track bodyweight movements (pull-ups, dips, planks) properly.
+          </p>
+        </Fade>
+
+        <Fade d={140}>
+          <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", minHeight: 280 }}>
+            <ScrollDrum
+              value={pendingBw}
+              onChange={setPendingBw}
+              min={40}
+              max={200}
+              step={0.5}
+              label="kg"
+            />
+          </div>
+        </Fade>
+
+        <Fade d={200}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <button onClick={handleBwSave} style={{
+              width: "100%", padding: "18px 24px",
+              background: T.coral, border: "none", borderRadius: T.r.lg, cursor: "pointer",
+              fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
+              boxShadow: `0 12px 40px ${s.glow}`,
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+            }}>
+              <span>Save & continue</span>
+              <span style={{ fontSize: 18 }}>→</span>
+            </button>
+            <button onClick={handleBwSkip} style={{
+              width: "100%", padding: "14px 24px",
+              background: "transparent", border: "none", cursor: "pointer",
+              fontFamily: T.sans, fontSize: 14, fontWeight: 400, color: T.text3,
+            }}>
+              Skip
+            </button>
+          </div>
+        </Fade>
+      </div>
+    );
+  }
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased",padding:"72px 24px 48px",position:"relative",overflow:"hidden"}}>
