@@ -22,6 +22,17 @@ import {
   computeNextPrescription,
   updateLiftStateFromSession,
   updateMuscleAnchorFromSession,
+  // Phase 3
+  shouldOfferDeload,
+  computeDeloadPrescription,
+  computeRecoveryPrescription,
+  startDeload,
+  completeDeload,
+  dismissDeloadOffer,
+  decrementRecoveryCounter,
+  shouldAutoCompleteDeload,
+  deloadCardCopy,
+  deloadDayLabel,
 } from "@/lib/progression";
 import { getLiftProfile } from "@/lib/lift-translations";
 import {
@@ -257,6 +268,14 @@ export default function ForgeApp(){
   const [bwEditOpen,setBwEditOpen]=useState(false); // BW edit modal state
   const [bwPromptedThisSession,setBwPromptedThisSession]=useState(false); // only prompt once per session
 
+  // Phase 3 — Deload state. Driven by training-state mesocycle subtree.
+  //   activeDeload: when set, every prescribed weight is deloaded + carries the day-N tag.
+  //   deloadOffer: signal object when an offer should surface on home; null when not.
+  //   showDeloadComplete: one-shot flag for "Deload complete. Welcome back." on Done screen.
+  const [activeDeload,setActiveDeload]=useState(null); // { startedAt, plannedDays, ... } | null
+  const [deloadOffer,setDeloadOffer]=useState(null);   // signal object | null
+  const [showDeloadComplete,setShowDeloadComplete]=useState(false); // one-shot for Done screen
+
   // Subscribe to sync status changes
   useEffect(() => {
     return SyncStatus.subscribe(status => setSyncState(status.state));
@@ -316,6 +335,18 @@ export default function ForgeApp(){
     const bw = BW.getKg(activeProfile);
     setBodyweightState(bw);
     setBwIsStale(BW.isStale(activeProfile));
+
+    // Phase 3 — hydrate deload state from training state
+    // activeDeload tells the session screen to show the "deload · day N" tag.
+    // shouldOfferDeload checks signals + cooldowns to decide if the home card surfaces.
+    try {
+      const ts = TS.get(activeProfile);
+      const fullHist = H.get(activeProfile);
+      setActiveDeload(ts?.mesocycle?.activeDeload || null);
+      setDeloadOffer(shouldOfferDeload(ts, fullHist));
+    } catch (e) {
+      console.error("[forge:phase3-hydrate]", e);
+    }
 
     return () => disableAutoSync();
   },[activeProfile]);
@@ -581,16 +612,40 @@ export default function ForgeApp(){
       D.clear(activeProfile);
       setPendingDraft(null);
 
-      // ─── Phase 2: progression engine ──────────────────────────────────
+      // ─── Phase 2 + 3: progression engine + deload transitions ─────────
       // For every exercise in the just-finished session, compute next
-      // prescription, update lift state + muscle anchors, and write the
-      // new working weight back to setWW so future sessions pick it up.
+      // prescription (standard / deload / recovery), update lift state +
+      // muscle anchors, and write the new working weight back to setWW.
       // Engine is silent — user sees a quietly smarter app.
       if (sessionRecord) {
         try {
           const fullHistory = H.get(activeProfile); // already includes the new record
-          const trainingState = TS.get(activeProfile);
+          let trainingState = TS.get(activeProfile);
           const wwUpdates = {};
+
+          // Phase 3 — was a deload active and should it auto-complete?
+          // Auto-completion fires on the first session ≥ 4 days after deload start.
+          // The current session being logged IS that crossing-the-threshold session,
+          // so we run the standard progression on it (recovery from this point on)
+          // rather than treating it as another deload session.
+          const wasInDeload = !!trainingState.mesocycle?.activeDeload;
+          let justCompletedDeload = false;
+          if (wasInDeload && shouldAutoCompleteDeload(trainingState, sessionRecord.date)) {
+            trainingState = completeDeload(trainingState);
+            TS.replaceState(activeProfile, trainingState);
+            justCompletedDeload = true;
+            setActiveDeload(null);
+            setShowDeloadComplete(true); // one-shot for Done screen
+          }
+
+          // After auto-completion, every lift now has inRecoveryUntil > 0.
+          // The very session that triggered auto-completion still uses STANDARD
+          // accumulation logic (it's the user's first non-deload session) — so
+          // we DON'T run recovery prescription on this session. Recovery starts
+          // from the NEXT session forward.
+
+          // If still in active deload (didn't cross threshold), this session uses deload prescriptions.
+          const stillInDeload = !justCompletedDeload && wasInDeload;
 
           for (const block of sessionRecord.blocks || []) {
             for (const ex of block.exercises || []) {
@@ -601,16 +656,28 @@ export default function ForgeApp(){
                 ? trainingState.muscleAnchors?.[anchorMuscle] || null
                 : null;
 
-              const prescription = computeNextPrescription({
-                liftName: ex.name,
-                history: fullHistory,
-                liftState,
-                muscleAnchor,
-                context: {
-                  readiness: sessionRecord.readiness,
-                  currentWeight: workingWeights[ex.name] ?? ex.sets?.[0]?.weight ?? null,
-                },
-              });
+              let prescription;
+              const context = {
+                readiness: sessionRecord.readiness,
+                currentWeight: workingWeights[ex.name] ?? ex.sets?.[0]?.weight ?? null,
+              };
+
+              if (stillInDeload) {
+                // Active deload — flat scaled prescription, no progression decisions
+                prescription = computeDeloadPrescription(ex.name, liftState, context);
+              } else if (liftState?.inRecoveryUntil > 0 && !justCompletedDeload) {
+                // In recovery phase — rebuild from deloaded weight
+                prescription = computeRecoveryPrescription(ex.name, liftState, fullHistory, context);
+              } else {
+                // Standard accumulation (Phase 2)
+                prescription = computeNextPrescription({
+                  liftName: ex.name,
+                  history: fullHistory,
+                  liftState,
+                  muscleAnchor,
+                  context,
+                });
+              }
 
               // Update working weights for next session — only when engine
               // returned a numeric weight (BW lifts return null).
@@ -618,18 +685,46 @@ export default function ForgeApp(){
                 wwUpdates[ex.name] = prescription.weight;
               }
 
-              // Persist updated lift state
-              const newLiftState = updateLiftStateFromSession(
-                liftState,
-                sessionRecord,
-                ex,
-                prescription,
-              );
-              TS.updateLift(activeProfile, ex.name, newLiftState);
+              // Persist updated lift state. During an active deload, we DON'T
+              // run the standard updateLiftStateFromSession (which would mutate
+              // stallSignal, e1RM, consecutiveHolds) — the deload window is
+              // invisible to progression tracking. Instead, just keep liftState
+              // as-is. The auto-completion path falls through to standard
+              // updateLiftStateFromSession on this session.
+              if (stillInDeload && liftState) {
+                // Deload session — leave lift state untouched aside from history
+                const lastHistEntry = {
+                  date: sessionRecord.date,
+                  weight: ex.sets?.[0]?.weight ?? null,
+                  effectiveLoad: ex.sets?.[0]?.effectiveLoad ?? null,
+                  reps: ex.sets?.[0]?.reps ?? null,
+                  rir: ex.sets?.[0]?.rir ?? null,
+                  est1rm: null,
+                  decision: "DELOAD",
+                  rationale: ["deload_session_logged"],
+                };
+                TS.updateLift(activeProfile, ex.name, {
+                  ...liftState,
+                  history: [...(liftState.history || []), lastHistEntry].slice(-12),
+                });
+              } else {
+                const newLiftState = updateLiftStateFromSession(
+                  liftState,
+                  sessionRecord,
+                  ex,
+                  prescription,
+                );
+                // If this session was a recovery session (lift had inRecoveryUntil > 0),
+                // decrement the counter so we step toward "back to accumulation."
+                const counterAdjusted = (liftState?.inRecoveryUntil > 0 && !justCompletedDeload)
+                  ? decrementRecoveryCounter(newLiftState)
+                  : newLiftState;
+                TS.updateLift(activeProfile, ex.name, counterAdjusted);
+              }
 
               // Update muscle anchor — only for loaded lifts with a known muscle group.
-              // Anchor tracks the strongest implied muscle-group strength across all lifts.
-              if (anchorMuscle && profile.progressesByLoad) {
+              // Skip during deload (the weights aren't representative of true strength).
+              if (anchorMuscle && profile.progressesByLoad && !stillInDeload) {
                 const currentAnchor = TS.get(activeProfile).muscleAnchors?.[anchorMuscle] || null;
                 const newAnchor = updateMuscleAnchorFromSession(currentAnchor, sessionRecord, ex);
                 if (newAnchor) TS.updateMuscleAnchor(activeProfile, anchorMuscle, newAnchor);
@@ -640,6 +735,15 @@ export default function ForgeApp(){
           if (Object.keys(wwUpdates).length) {
             setWW(p => ({ ...p, ...wwUpdates }));
           }
+
+          // Phase 3 — refresh the home-screen offer state.
+          // After this session's progression updates, recompute whether a deload
+          // offer should show. Captures e.g. "this session pushed a lift into
+          // deep_stall, so the offer surfaces on next home view."
+          const finalState = TS.get(activeProfile);
+          const finalHistory = H.get(activeProfile);
+          setDeloadOffer(shouldOfferDeload(finalState, finalHistory));
+          setActiveDeload(finalState?.mesocycle?.activeDeload || null);
         } catch (e) {
           // Engine errors must never block session completion.
           console.error("[forge:progression]", e);
@@ -698,7 +802,7 @@ export default function ForgeApp(){
   }
 
   if(!activeProfile||showProfiles){
-  return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} bwEditOpen={bwEditOpen} setBwEditOpen={setBwEditOpen} updateBodyweight={updateBodyweight}/>;
+  return <ProfileScreen existing={P.list()} current={activeProfile} onActivate={activateProfile} onCancel={showProfiles?()=>setShowProfiles(false):null} bodyweight={bodyweight} onOpenBwEdit={()=>setBwEditOpen(true)}/>;
   }
 
 const sProps={
@@ -712,6 +816,8 @@ const sProps={
   restActive,restRemain,setRestActive,setRestRemain,
   onCommit:commitLog,onLog:handleLog,onQuit:reset,
   bodyweight,
+  // Phase 3 — when active, SessionScreen renders "deload · day N of M" subtitle below prescribed weight.
+  deloadDayTag: activeDeload ? deloadDayLabel(activeDeload) : null,
   };
 
   // Derive today's session index for HomeScreen
@@ -831,14 +937,44 @@ const sProps={
     setPendingDraft(null);
   };
 
+  // Phase 3 — deload accept handler. Snapshots current weights, sets activeDeload,
+  // closes the offer card. From the next session forward, prescriptions come back
+  // scaled until auto-completion fires.
+  const handleAcceptDeload = () => {
+    if (!activeProfile || !deloadOffer) return;
+    try {
+      const ts = TS.get(activeProfile);
+      const newState = startDeload(ts, deloadOffer);
+      TS.replaceState(activeProfile, newState);
+      setActiveDeload(newState.mesocycle.activeDeload);
+      setDeloadOffer(null);
+    } catch (e) {
+      console.error("[forge:deload-accept]", e);
+    }
+  };
+
+  // Phase 3 — dismiss handler. Sets the 5-day cooldown so the card hides for a
+  // sensible window. If signals persist after cooldown, card re-surfaces.
+  const handleDismissDeload = () => {
+    if (!activeProfile) return;
+    try {
+      const ts = TS.get(activeProfile);
+      const newState = dismissDeloadOffer(ts);
+      TS.replaceState(activeProfile, newState);
+      setDeloadOffer(null);
+    } catch (e) {
+      console.error("[forge:deload-dismiss]", e);
+    }
+  };
+
   const weeksOnBlock = weeksSince(programmeBlock.startDate);
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)}/>}
+      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)} deloadOffer={deloadOffer} onAcceptDeload={handleAcceptDeload} onDismissDeload={handleDismissDeload}/>}
       {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} reason={readinessReason} setReason={setReadinessReason} onStart={handleReadinessStart}/>}
       {screen==="session"     && <ErrorBoundary><SessionScreen {...sProps}/></ErrorBoundary>}
-      {screen==="done"        && <ErrorBoundary><DoneScreen session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={reset}/></ErrorBoundary>}
+      {screen==="done"        && <ErrorBoundary><DoneScreen session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={()=>{ setShowDeloadComplete(false); reset(); }} deloadCompleted={showDeloadComplete}/></ErrorBoundary>}
       {screen==="performance" && <ErrorBoundary><PerformanceLab history={history} onBack={()=>setScreen("home")}/></ErrorBoundary>}
       {rotationSummary        && <RotationSummaryModal summary={rotationSummary} onContinue={handleRotationContinue}/>}
       {showIosInstall         && <IosInstallOverlay onDismiss={()=>{ LS.set("forge:iosInstallDismissed", true); setShowIosInstall(false); }}/>}
@@ -1149,7 +1285,7 @@ function PromiseLine({ accent, kicker, body }) {
 }
 
 // ─── Profile Screen ────────────────────────────────────────────────────────────
-function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwEditOpen=false,setBwEditOpen,updateBodyweight}){
+function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,onOpenBwEdit}){
   const [name,setName]=useState("");
   const [confirmWipe,setConfirmWipe]=useState(null);
   const [showTakenHelp,setShowTakenHelp]=useState(false);
@@ -1440,9 +1576,9 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
       )}
 
       {/* Bodyweight row — tappable to edit */}
-      {current && setBwEditOpen && (
+      {current && onOpenBwEdit && (
         <Fade d={260}>
-          <div onClick={()=>setBwEditOpen(true)}
+          <div onClick={onOpenBwEdit}
             style={{marginTop:16,padding:"14px 18px",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"space-between",transition:`all 180ms ${T.ease}`}}>
             <div>
               <div style={{fontSize:13,fontWeight:500,color:T.text1}}>Bodyweight</div>
@@ -1631,15 +1767,12 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
           setPasskeyError={setPasskeyError}
         />
       )}
-
-      {/* Bodyweight edit modal — rendered here so it works within ProfileScreen's early return */}
-      <BodyweightEditModal open={bwEditOpen} onClose={()=>setBwEditOpen(false)} currentKg={bodyweight} onSave={updateBodyweight}/>
     </div>
   );
 }
 
-// ─── Home ──────────────────────────────────��──────────────────────────────────
-function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft,showBwCard=false,onOpenBwEdit,onDismissBwCard}){
+// ─── Home ─────────────────────────────────────────────────────────────────────
+function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft,showBwCard=false,onOpenBwEdit,onDismissBwCard,deloadOffer=null,onAcceptDeload,onDismissDeload}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -1954,6 +2087,39 @@ function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayD
         </Fade>
       )}
 
+      {/* Phase 3 — Deload offer card. Sage-tinted, surfaces only when signals
+          warrant (stall convergence, deep stall, cooked accumulation, regression).
+          Cooldowns prevent re-surfacing immediately after dismiss or completion. */}
+      {deloadOffer && (() => {
+        const copy = deloadCardCopy(deloadOffer);
+        if (!copy) return null;
+        return (
+          <Fade d={170}>
+            <div style={{margin:"20px 24px 0",padding:"20px 22px",background:`${T.sage}0E`,border:`1px solid ${T.sage}40`,borderRadius:T.r.lg,boxShadow:`0 8px 28px ${T.sage}10`}}>
+              <div style={{fontSize:11,fontWeight:500,color:T.sage,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:10}}>
+                {copy.kicker}
+              </div>
+              <div style={{fontFamily:T.serif,fontSize:20,fontWeight:300,color:T.text1,lineHeight:1.25,marginBottom:8}}>
+                {copy.headline}
+              </div>
+              <div style={{fontSize:13,color:T.text2,lineHeight:1.55,marginBottom:18}}>
+                {copy.body}
+              </div>
+              <div style={{display:"flex",gap:10}}>
+                <button onClick={onAcceptDeload}
+                  style={{flex:1,padding:"12px 16px",background:T.sage,border:"none",borderRadius:T.r.md,cursor:"pointer",fontFamily:T.serif,fontSize:14,fontWeight:400,color:T.bg0}}>
+                  Run the deload →
+                </button>
+                <button onClick={onDismissDeload}
+                  style={{flexShrink:0,padding:"12px 16px",background:"transparent",border:`1px solid ${T.bg3}`,borderRadius:T.r.md,cursor:"pointer",fontFamily:T.sans,fontSize:13,color:T.text3}}>
+                  Not yet
+                </button>
+              </div>
+            </div>
+          </Fade>
+        );
+      })()}
+
       {/* Honest recovery nudge — surfaces when the last 2 sessions were cooked.
           Non-pushy. Dismisses in-memory for this session. */}
       {recoveryNudge && (
@@ -2131,7 +2297,7 @@ function RpeCard({onPick,label="How was that set?"}){
 }
 
 // ─── Session ──────────────────────────────────────────────────────────────────
-function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,resolvedExA,resolvedExB,resolvedEx,swapKey,onSwap,showVid,setShowVid,getW,getR,editTarget,setEditTarget,workingWeights,setWW,workingReps,setWR,awaitRpe,ssRoundDone,restActive,restRemain,setRestActive,setRestRemain,onCommit,onLog,onQuit,bodyweight}){
+function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,activeEx,resolvedExA,resolvedExB,resolvedEx,swapKey,onSwap,showVid,setShowVid,getW,getR,editTarget,setEditTarget,workingWeights,setWW,workingReps,setWR,awaitRpe,ssRoundDone,restActive,restRemain,setRestActive,setRestRemain,onCommit,onLog,onQuit,bodyweight,deloadDayTag=null}){
   const {strength:s}=T;
   const [swapEx,setSwapEx]=useState(null);
   const partnerEx=isSS?(phase==="A"?resolvedExB:resolvedExA):null;
@@ -2213,6 +2379,13 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
           <span style={{fontSize:14,color:T.text3,marginBottom:4}}>reps</span>
           <span style={{fontSize:11,color:T.text3,marginBottom:6,marginLeft:4}}>↕</span>
         </div>
+        {/* Phase 3 — quiet "deload · day N of M" subtitle in muted gold.
+            Only renders during an active deload window. */}
+        {deloadDayTag && (
+          <div style={{marginTop:8,fontSize:11,fontWeight:500,color:`${T.gold}99`,letterSpacing:"0.08em",fontStyle:"italic",fontFamily:T.serif}}>
+            {deloadDayTag}
+          </div>
+        )}
       </div>
       <div style={{padding:"16px 20px 0",display:"flex",gap:6}}>
         {Array.from({length:block.sets}).map((_,i)=>(
@@ -2419,7 +2592,7 @@ function RotationSummaryModal({summary,onContinue}){
   );
 }
 
-// ─── Drum Edit ───────────────��─────────────────────────────────────────────────
+// ─── Drum Edit ─────────────────────────────────────────────────────────────────
 function DrumEditOverlay({target,workingWeights,setWW,workingReps,setWR,block,onClose}){
   const ex=block.type==="main"?block.ex:(target.exName===block.exA?.name?block.exA:block.exB);
   const initKg  =workingWeights[target.exName]??ex?.weight??0;
@@ -2511,7 +2684,7 @@ const NEXT_DAY_MSG = {
   strength:"Strength session next. Load up.",
 };
 
-function DoneScreen({session,profileName,workingWeights,onHome}){
+function DoneScreen({session,profileName,workingWeights,onHome,deloadCompleted=false}){
   const nudges = session.blocks.filter(b=>b.type==="main").map(b=>{
     const base    = b.ex.weight;
     const current = workingWeights[b.ex.name] ?? base;
@@ -2563,6 +2736,15 @@ function DoneScreen({session,profileName,workingWeights,onHome}){
           </Card>
         </Fade>
       ))}
+      {/* Phase 3 — One-line acknowledgement when this session crossed the
+          auto-completion threshold for an active deload. Sage, italic, small. */}
+      {deloadCompleted && (
+        <Fade d={240}>
+          <div style={{marginTop:24,textAlign:"center",fontFamily:T.serif,fontSize:14,fontStyle:"italic",fontWeight:300,color:T.sage,letterSpacing:"0.01em"}}>
+            Deload complete. Welcome back.
+          </div>
+        </Fade>
+      )}
       <Fade d={260}>
         <button onClick={onHome} style={{marginTop:20,width:"100%",padding:"18px 24px",background:T.coral,border:"none",borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:20,fontWeight:400,color:T.bg0,boxShadow:`0 12px 40px ${T.strength.glow}`}}>
           Back to home →
