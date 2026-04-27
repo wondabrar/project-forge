@@ -6,6 +6,8 @@ import {
   EXERCISE_POOLS, rotateAccessories, rotationDiff,
   ROTATION_OPTIONAL, ROTATION_AUTO, ROTATION_FORCED,
   DAY_CONFIG, DAY_NAMES, SWAP_DB, EQ_COLOUR,
+  // Retrospective logging helpers (compute past-date programme metadata + missing-day detection)
+  sessionMetaForDate, findRecentDays, hasMissedStrength,
 } from "@/lib/programme";
 import {
   LS, P, PB, H, BW, bumpStreak,
@@ -285,6 +287,15 @@ export default function ForgeApp(){
   const [deloadOffer,setDeloadOffer]=useState(null);   // signal object | null
   const [showDeloadComplete,setShowDeloadComplete]=useState(false); // one-shot for Done screen
 
+  // Retrospective logging state. Driven from the home picker — when retroDate
+  // is set the app jumps to a single-screen form pre-populated from the
+  // programme rotation for that date. After submit, the record lands in
+  // history and runs through the same finalise pipeline as a live session.
+  // 3-day rolling window — anything older is archaeology, not gap-filling.
+  const [retroPickerOpen,setRetroPickerOpen]=useState(false);
+  const [retroDate,setRetroDate]            =useState(null); // ISO YYYY-MM-DD or null
+  const [retroToast,setRetroToast]          =useState(null); // { date, sessionName } | null
+
   // Subscribe to sync status changes
   useEffect(() => {
     return SyncStatus.subscribe(status => setSyncState(status.state));
@@ -296,6 +307,12 @@ export default function ForgeApp(){
     () => (recoveryDismissed ? null : detectRecoveryPattern(history)),
     [history, recoveryDismissed]
   );
+
+  // Retro discoverability — only surface the "Log past session" link on home
+  // when there's actually something to fill. If the user trained every strength
+  // day in the last 3, the link stays hidden and home stays calm. Recomputed
+  // automatically as history grows.
+  const hasRetroGaps = useMemo(() => hasMissedStrength(history, 3), [history]);
 
   // Seed on profile change: instant load from localStorage, background sync from blob
   useEffect(()=>{
@@ -988,15 +1005,241 @@ const sProps={
     }
   };
 
+  // ─── Retrospective logging handlers ────────────────────────────────────────
+  // Three handlers: open the picker, pick a date (transitions to retro screen),
+  // and finalise — taking the user-filled data and pushing it through the
+  // standard newDraftLog → logSet → finaliseDraft → H.append pipeline. The
+  // engine block immediately afterwards (Phase 2/3/4) runs unchanged because
+  // the session record looks identical to a live one save for `retrospective: true`.
+  const handleOpenRetroPicker = () => {
+    if (pendingDraft) return; // can't retro-log while a live draft is open
+    setRetroPickerOpen(true);
+  };
+
+  const handlePickRetroDate = (dateStr) => {
+    setRetroDate(dateStr);
+    setRetroPickerOpen(false);
+    setScreen("retro");
+  };
+
+  // Finalise a retrospective session. Called by RetrospectiveSessionSheet
+  // with a payload describing what the user filled in. This handler is
+  // intentionally chunky — it owns the "make this look identical to a live
+  // session record so the engine doesn't need a code path for it" job.
+  const handleSubmitRetro = useCallback((payload) => {
+    if (!activeProfile || !retroDate) return;
+    const meta = sessionMetaForDate(retroDate);
+    if (!meta || meta.type !== "strength") return;
+
+    const sessionDef = SESSIONS[meta.sessionIdx];
+    if (!sessionDef) return;
+
+    try {
+      // Build a draft, pre-anchored to the selected date so the resulting
+      // record's id sorts to the correct chronological position in history.
+      const draft = newDraftLog({
+        profileName: activeProfile,
+        session: `strength-${["a","b","c"][meta.sessionIdx]}`,
+        blockNumber: programmeBlock?.number ?? 1,
+        readiness: "normal",                  // user skipped readiness for retro
+        readinessReason: null,
+        mesocyclePhase: activeDeload ? "deload" : "accumulation",
+        bodyweight: bodyweight,               // current BW — close enough at 3-day window
+        hoursSlept: null,
+        daysSinceLast: null,
+      });
+
+      // Override id + date to the SELECTED retro date — anchored at noon UTC
+      // so it sorts cleanly against live records (which are timestamped at log time).
+      draft.id   = `${retroDate}T12:00:00.000Z`;
+      draft.date = retroDate;
+      draft.dow  = new Date(retroDate + "T12:00:00").getDay();
+      draft.startedAt = new Date(retroDate + "T12:00:00").getTime();
+      draft.retrospective = true;             // explicit flag — survives finaliseDraft
+      draft.loggedAt = new Date().toISOString(); // when the user actually entered it
+
+      // Walk the user's filled-in payload and log each set. Skipped exercises
+      // contribute no sets (and therefore no engine signal) — they're just absent.
+      for (const exEntry of payload.exercises) {
+        if (exEntry.skipped) continue;
+        for (let setIdx = 0; setIdx < exEntry.weights.length; setIdx++) {
+          const w = exEntry.weights[setIdx];
+          const r = exEntry.reps[setIdx];
+          if (w === null && (r === null || r === undefined || r === "")) continue;
+          logSet(draft, {
+            blockId: exEntry.blockId,
+            blockType: exEntry.blockType,
+            exerciseName: exEntry.name,
+            muscle: exEntry.muscle,
+            swapped: false,
+            fromPool: null,
+            loadType: exEntry.loadType,
+            bodyweight: bodyweight,
+            weight: w,
+            reps: r,
+            rpe: exEntry.rpe || "normal",     // single RPE applied to all sets
+            prescribed: exEntry.prescribed,
+            tempo: null,
+            blockIntent: exEntry.blockIntent || null,
+          });
+        }
+      }
+
+      const sessionRecord = finaliseDraft(draft);
+      // Preserve retro flag through finalise (spread `...rest` in finaliseDraft
+      // would have stripped it if newDraftLog hadn't put it on the draft, but
+      // since we set it on the draft directly, finaliseDraft preserves it).
+      sessionRecord.retrospective = true;
+
+      H.append(activeProfile, sessionRecord);
+      setHistory(H.get(activeProfile));
+
+      // ─── Engine block — runs identically to live finalise hook ─────────
+      try {
+        const fullHistory = H.get(activeProfile);
+        let trainingState = TS.get(activeProfile);
+        const wwUpdates = {};
+
+        // Phase 3 — auto-completion check still applies if a deload is active
+        // and this retro session crosses the threshold. Edge case but correct.
+        const wasInDeload = !!trainingState.mesocycle?.activeDeload;
+        let justCompletedDeload = false;
+        if (wasInDeload && shouldAutoCompleteDeload(trainingState, sessionRecord.date)) {
+          trainingState = completeDeload(trainingState);
+          TS.replaceState(activeProfile, trainingState);
+          justCompletedDeload = true;
+          setActiveDeload(null);
+        }
+        const stillInDeload = !justCompletedDeload && wasInDeload;
+
+        for (const block of sessionRecord.blocks || []) {
+          for (const ex of block.exercises || []) {
+            const liftState     = trainingState.lifts?.[ex.name] || null;
+            const profile       = getLiftProfile(ex.name);
+            const anchorMuscle  = profile.primaryMuscle;
+            const muscleAnchor  = anchorMuscle
+              ? trainingState.muscleAnchors?.[anchorMuscle] || null
+              : null;
+
+            let prescription;
+            const context = {
+              readiness: sessionRecord.readiness,
+              currentWeight: workingWeights[ex.name] ?? ex.sets?.[0]?.weight ?? null,
+            };
+
+            if (stillInDeload) {
+              prescription = computeDeloadPrescription(ex.name, liftState, context);
+            } else if (liftState?.inRecoveryUntil > 0 && !justCompletedDeload) {
+              prescription = computeRecoveryPrescription(ex.name, liftState, fullHistory, context);
+            } else {
+              prescription = computeNextPrescription({
+                liftName: ex.name,
+                history: fullHistory,
+                liftState,
+                muscleAnchor,
+                context,
+              });
+            }
+
+            if (prescription.weight !== null && prescription.weight !== undefined) {
+              wwUpdates[ex.name] = prescription.weight;
+            }
+
+            if (stillInDeload && liftState) {
+              const lastHistEntry = {
+                date: sessionRecord.date,
+                weight: ex.sets?.[0]?.weight ?? null,
+                effectiveLoad: ex.sets?.[0]?.effectiveLoad ?? null,
+                reps: ex.sets?.[0]?.reps ?? null,
+                rir: ex.sets?.[0]?.rir ?? null,
+                est1rm: null,
+                decision: "DELOAD",
+                rationale: ["deload_session_logged"],
+              };
+              TS.updateLift(activeProfile, ex.name, {
+                ...liftState,
+                history: [...(liftState.history || []), lastHistEntry].slice(-12),
+              });
+            } else {
+              const newLiftState = updateLiftStateFromSession(liftState, sessionRecord, ex, prescription);
+              const counterAdjusted = (liftState?.inRecoveryUntil > 0 && !justCompletedDeload)
+                ? decrementRecoveryCounter(newLiftState)
+                : newLiftState;
+              TS.updateLift(activeProfile, ex.name, counterAdjusted);
+            }
+
+            if (anchorMuscle && profile.progressesByLoad && !stillInDeload) {
+              const currentAnchor = TS.get(activeProfile).muscleAnchors?.[anchorMuscle] || null;
+              const newAnchor     = updateMuscleAnchorFromSession(currentAnchor, sessionRecord, ex);
+              if (newAnchor) TS.updateMuscleAnchor(activeProfile, anchorMuscle, newAnchor);
+            }
+          }
+        }
+
+        if (Object.keys(wwUpdates).length) {
+          setWW(p => ({ ...p, ...wwUpdates }));
+        }
+
+        // Phase 3 — refresh offer state
+        const finalState   = TS.get(activeProfile);
+        const finalHistory = H.get(activeProfile);
+        setDeloadOffer(shouldOfferDeload(finalState, finalHistory));
+        setActiveDeload(finalState?.mesocycle?.activeDeload || null);
+
+        // Phase 4 — recompute volume aggregates
+        const aggregates = computeVolumeAggregates(finalHistory);
+        TS.updateVolume(activeProfile, aggregates);
+      } catch (e) {
+        console.error("[forge:retro-engine]", e);
+      }
+
+      // Anonymous completion signal — same path as live session finalise.
+      // No PII; enum-only dimensions. retro=1 lets us see post-launch how
+      // often this feature is used vs live logging.
+      try {
+        track("session_complete", {
+          session: sessionRecord.session,
+          retro: 1,
+        });
+      } catch {/* analytics never blocks */}
+
+      // Push to blob in background
+      blobPush(activeProfile, {
+        meta: { weights: workingWeights, reps: workingReps },
+        history: H.get(activeProfile),
+      });
+
+      // Confirm with toast, return to home — DoneScreen would be jarring here
+      // (user is rapid-firing through past sessions, not celebrating each one).
+      setRetroToast({
+        date: meta.dateLabel,
+        sessionName: meta.sessionName,
+      });
+      setRetroDate(null);
+      setScreen("home");
+      // Auto-dismiss toast after 3s
+      setTimeout(() => setRetroToast(null), 3000);
+    } catch (e) {
+      console.error("[forge:retro-submit]", e);
+    }
+  }, [activeProfile, retroDate, programmeBlock, activeDeload, bodyweight, workingWeights, workingReps]);
+
+  const handleCancelRetro = () => {
+    setRetroDate(null);
+    setScreen("home");
+  };
+
   const weeksOnBlock = weeksSince(programmeBlock.startDate);
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)} deloadOffer={deloadOffer} onAcceptDeload={handleAcceptDeload} onDismissDeload={handleDismissDeload}/>}
+      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)} deloadOffer={deloadOffer} onAcceptDeload={handleAcceptDeload} onDismissDeload={handleDismissDeload} hasRetroGaps={hasRetroGaps} onOpenRetroPicker={handleOpenRetroPicker} retroToast={retroToast} onDismissRetroToast={()=>setRetroToast(null)}/>}
       {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} reason={readinessReason} setReason={setReadinessReason} onStart={handleReadinessStart}/>}
       {screen==="session"     && <ErrorBoundary><SessionScreen {...sProps}/></ErrorBoundary>}
       {screen==="done"        && <ErrorBoundary><DoneScreen session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={()=>{ setShowDeloadComplete(false); reset(); }} deloadCompleted={showDeloadComplete}/></ErrorBoundary>}
       {screen==="performance" && <ErrorBoundary><PerformanceLab history={history} onBack={()=>setScreen("home")}/></ErrorBoundary>}
+      {screen==="retro"       && retroDate && <ErrorBoundary><RetrospectiveSessionSheet date={retroDate} bodyweight={bodyweight} workingWeights={workingWeights} workingReps={workingReps} onCancel={handleCancelRetro} onSubmit={handleSubmitRetro}/></ErrorBoundary>}
+      {retroPickerOpen        && <RetroPickerSheet history={history} pendingDraft={pendingDraft} onPick={handlePickRetroDate} onClose={()=>setRetroPickerOpen(false)}/>}
       {rotationSummary        && <RotationSummaryModal summary={rotationSummary} onContinue={handleRotationContinue}/>}
       {showIosInstall         && <IosInstallOverlay onDismiss={()=>{ LS.set("forge:iosInstallDismissed", true); setShowIosInstall(false); }}/>}
       <BodyweightEditModal open={bwEditOpen} onClose={()=>setBwEditOpen(false)} currentKg={bodyweight} onSave={updateBodyweight}/>
@@ -1809,7 +2052,7 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
 }
 
 // ─── Home ──────────────────────────────────��──────────────────────────────────
-function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft,showBwCard=false,onOpenBwEdit,onDismissBwCard,deloadOffer=null,onAcceptDeload,onDismissDeload}){
+function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft,showBwCard=false,onOpenBwEdit,onDismissBwCard,deloadOffer=null,onAcceptDeload,onDismissDeload,hasRetroGaps=false,onOpenRetroPicker,retroToast=null,onDismissRetroToast}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -2176,6 +2419,36 @@ function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayD
             </div>
           </div>
         </Fade>
+      )}
+
+      {/* Retrospective logging link — only surfaces when there's a missed
+          strength day in the last 3. Calm by design: no card, no chrome,
+          just an inline link tinted sage so it reads as a non-action utility
+          rather than competing with the day's "begin session" CTA. */}
+      {hasRetroGaps && !pendingDraft && onOpenRetroPicker && (
+        <Fade d={190}>
+          <div style={{margin:"18px 24px 0",display:"flex",justifyContent:"center"}}>
+            <button onClick={onOpenRetroPicker}
+              style={{background:"none",border:"none",padding:"6px 4px",cursor:"pointer",fontFamily:T.sans,fontSize:13,color:T.sage,letterSpacing:"0.01em"}}>
+              Missed a session? <span style={{fontStyle:"italic",fontFamily:T.serif,marginLeft:2}}>Log it</span> →
+            </button>
+          </div>
+        </Fade>
+      )}
+
+      {/* Retro completion toast — sage, 3s auto-dismiss. Sits at the top of
+          the home screen because by the time it shows we're already back here. */}
+      {retroToast && (
+        <div style={{position:"fixed",top:"calc(20px + env(safe-area-inset-top))",left:"50%",transform:"translateX(-50%)",zIndex:300,maxWidth:"calc(100% - 48px)",pointerEvents:"auto"}}>
+          <div onClick={onDismissRetroToast}
+            style={{background:T.bg2,border:`1px solid ${T.sage}55`,borderRadius:T.r.lg,padding:"12px 18px",boxShadow:`0 12px 40px rgba(0,0,0,0.5), 0 0 24px ${T.sage}20`,cursor:"pointer",animation:`retroToastIn 280ms ${T.ease}`,display:"flex",alignItems:"center",gap:10}}>
+            <style>{`@keyframes retroToastIn{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}`}</style>
+            <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:T.sage,flexShrink:0}}/>
+            <span style={{fontSize:13,color:T.text1}}>
+              Logged <span style={{fontStyle:"italic",fontFamily:T.serif}}>{retroToast.sessionName}</span> for {retroToast.date}
+            </span>
+          </div>
+        </div>
       )}
 
       {/* Rotation nudge — surfaces after 4 weeks on a block */}
@@ -2658,6 +2931,403 @@ function DrumEditOverlay({target,workingWeights,setWW,workingReps,setWR,block,on
           Confirm →
         </button>
       </div>
+    </div>
+  );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// RETROSPECTIVE LOGGING — picker bottom sheet + single-screen entry form
+// ═════════════════════════════════════════════════════════════════════════════
+//
+// Two components handle the retro flow. The picker is a small bottom sheet
+// listing the last 3 calendar days; only missed strength days are tappable.
+// The session sheet is a full screen showing every exercise on one page —
+// optimised for memory recall, not workout pacing. No timers, no readiness
+// modal, single RPE per exercise. Engine treats the resulting record exactly
+// like a live one.
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ─── Retro Picker Sheet ────────────────────────────────────────────────────────
+function RetroPickerSheet({history, pendingDraft, onPick, onClose}){
+  const rows = useMemo(() => findRecentDays(history, 3), [history]);
+  const draftBlocks = !!pendingDraft;
+
+  return (
+    <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"24px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.sage}28`,animation:`slideUp 260ms ${T.ease}`}}>
+        <style>{`@keyframes slideUp{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
+
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18}}>
+          <div>
+            <div style={{fontFamily:T.serif,fontSize:22,fontWeight:300,lineHeight:1.1}}>Recent days</div>
+            <div style={{fontSize:12,color:T.text3,marginTop:4,lineHeight:1.5}}>
+              {draftBlocks ? "Finish your live session first" : "Tap a missed strength day to log it"}
+            </div>
+          </div>
+          <button onClick={onClose} aria-label="Close" style={{background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,padding:"6px 10px",cursor:"pointer",color:T.text2,fontSize:13,flexShrink:0}}>✕</button>
+        </div>
+
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {rows.map((row) => {
+            const isStrength    = row.type === "strength";
+            const tappable      = isStrength && !row.logged && !draftBlocks;
+            const accentColor   = isStrength ? (row.logged ? T.text4 : T.coral) : T.text4;
+            const opacity       = draftBlocks ? 0.4 : (row.logged || !isStrength ? 0.55 : 1);
+
+            return (
+              <div key={row.date}
+                onClick={tappable ? () => onPick(row.date) : undefined}
+                style={{
+                  padding:"14px 16px",
+                  background: tappable ? `${T.coral}0A` : T.bg3,
+                  border: `1px solid ${tappable ? T.coral+"33" : T.bg4}`,
+                  borderRadius: T.r.md,
+                  cursor: tappable ? "pointer" : "default",
+                  display:"flex",alignItems:"center",justifyContent:"space-between",
+                  opacity,
+                  transition: `all 180ms ${T.ease}`,
+                }}>
+                <div style={{display:"flex",flexDirection:"column",gap:2}}>
+                  <div style={{fontFamily:T.serif,fontSize:16,fontWeight:300,color:T.text1,lineHeight:1.2}}>
+                    {row.dateLabel}
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                    <span style={{display:"inline-block",width:5,height:5,borderRadius:"50%",background:accentColor}}/>
+                    <span style={{fontSize:11,color:T.text3,letterSpacing:"0.04em"}}>
+                      {row.sessionName}
+                      {row.logged && " · logged"}
+                    </span>
+                  </div>
+                </div>
+                {tappable && <span style={{fontSize:18,color:T.coral}}>→</span>}
+                {!isStrength && <span style={{fontSize:10,color:T.text4,fontStyle:"italic",fontFamily:T.serif}}>{row.type === "rest" ? "rest" : "non-strength"}</span>}
+                {row.logged && <span style={{fontSize:11,color:T.sage,fontWeight:500,letterSpacing:"0.06em",textTransform:"uppercase"}}>✓</span>}
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{marginTop:16,fontSize:11,color:T.text4,fontStyle:"italic",fontFamily:T.serif,textAlign:"center",lineHeight:1.5}}>
+          Only the last 3 days. Anything older is archaeology.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Retrospective Session Sheet ───────────────────────────────────────────────
+// Full-screen single-page form. Pre-populated from the programme rotation for
+// the selected date. Auto-fill across cells in a row; tap any cell to override
+// via the existing ScrollDrum overlay. Skip toggle per exercise. One RPE
+// applied to all sets in an exercise.
+function RetrospectiveSessionSheet({date, bodyweight, workingWeights, workingReps, onCancel, onSubmit}){
+  const meta = useMemo(() => sessionMetaForDate(date), [date]);
+  const sessionDef = meta?.type === "strength" ? SESSIONS[meta.sessionIdx] : null;
+
+  // Flatten blocks into a single exercise list, but keep a back-reference to
+  // the source block so we can preserve block type/intent in the session record.
+  // Supersets and finishers contribute both exA + exB as independent rows in
+  // retro mode (no superset visual grouping — keeping the form simple).
+  const exerciseRows = useMemo(() => {
+    if (!sessionDef) return [];
+    const rows = [];
+    for (const block of sessionDef.blocks) {
+      if (block.type === "main") {
+        rows.push({ ...block.ex, blockId: block.id, blockType: block.type, sets: block.sets });
+      } else {
+        // superset / finisher — both exercises
+        if (block.exA) rows.push({ ...block.exA, blockId: block.id, blockType: block.type, sets: block.sets });
+        if (block.exB) rows.push({ ...block.exB, blockId: block.id, blockType: block.type, sets: block.sets });
+      }
+    }
+    return rows;
+  }, [sessionDef]);
+
+  // Per-exercise state. Initialised from prescribed weight/reps with all cells
+  // pre-filled. weightEdited / repsEdited tracks per-cell user overrides so the
+  // first-cell auto-fill only propagates to cells the user hasn't touched.
+  const [entries, setEntries] = useState(() => exerciseRows.map(ex => {
+    const setCount = ex.sets || 3;
+    const baseWeight = workingWeights[ex.name] ?? ex.weight ?? null;
+    const baseReps   = workingReps[ex.name] ?? ex.reps ?? null;
+    const lt = getLoadType(ex);
+    return {
+      name: ex.name,
+      muscle: ex.muscle,
+      blockId: ex.blockId,
+      blockType: ex.blockType,
+      blockIntent: null,
+      loadType: lt,
+      sets: setCount,
+      weights: Array(setCount).fill(baseWeight),
+      reps:    Array(setCount).fill(baseReps),
+      weightEdited: Array(setCount).fill(false),
+      repsEdited:   Array(setCount).fill(false),
+      rpe: "normal",
+      skipped: false,
+      prescribed: { sets: setCount, reps: baseReps, weight: baseWeight, rir: null },
+      vid: ex.vid,
+    };
+  }));
+
+  // Inline cell editor — { exIdx, cellIdx, kind: "weight"|"reps" }
+  const [editor, setEditor] = useState(null);
+
+  const updateCell = useCallback((exIdx, cellIdx, kind, value) => {
+    setEntries(prev => prev.map((entry, i) => {
+      if (i !== exIdx) return entry;
+      const arr = kind === "weight" ? [...entry.weights] : [...entry.reps];
+      const editedArr = kind === "weight" ? [...entry.weightEdited] : [...entry.repsEdited];
+
+      arr[cellIdx] = value;
+      editedArr[cellIdx] = true;
+
+      // Auto-fill: changing the first cell propagates to all subsequent cells
+      // that haven't been individually touched. Subsequent cell edits just
+      // mark themselves as edited and don't propagate.
+      if (cellIdx === 0) {
+        for (let j = 1; j < arr.length; j++) {
+          if (!editedArr[j]) arr[j] = value;
+        }
+      }
+
+      return {
+        ...entry,
+        ...(kind === "weight" ? { weights: arr, weightEdited: editedArr } : { reps: arr, repsEdited: editedArr }),
+      };
+    }));
+  }, []);
+
+  const toggleSkip = useCallback((exIdx) => {
+    setEntries(prev => prev.map((entry, i) => i === exIdx ? { ...entry, skipped: !entry.skipped } : entry));
+  }, []);
+
+  const setRpe = useCallback((exIdx, rpe) => {
+    setEntries(prev => prev.map((entry, i) => i === exIdx ? { ...entry, rpe } : entry));
+  }, []);
+
+  const allSkipped = entries.every(e => e.skipped);
+
+  if (!meta || meta.type !== "strength" || !sessionDef) {
+    return (
+      <div style={{padding:"72px 24px",fontFamily:T.sans,color:T.text2,textAlign:"center"}}>
+        <p>Couldn&apos;t resolve the session for that date.</p>
+        <button onClick={onCancel} style={{marginTop:20,padding:"12px 20px",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.md,color:T.text1,cursor:"pointer"}}>← Back</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{minHeight:"100vh",position:"relative",overflow:"hidden",paddingBottom:120}}>
+      {/* Sage ambient — wellness/measurement territory, not training */}
+      <div style={{position:"absolute",top:-100,right:-80,width:340,height:300,background:`radial-gradient(circle,${T.sage}1A 0%,transparent 65%)`,pointerEvents:"none"}}/>
+
+      {/* Header */}
+      <Fade d={0}>
+        <div style={{padding:"20px 20px 0",display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:12}}>
+          <button onClick={onCancel} aria-label="Cancel"
+            style={{background:"none",border:"none",padding:"4px 0",cursor:"pointer",fontSize:13,color:T.text3,fontFamily:T.sans,flexShrink:0}}>← Cancel</button>
+          <div style={{textAlign:"right",flex:1}}>
+            <div style={{fontFamily:T.serif,fontSize:20,fontWeight:300,lineHeight:1.15,color:T.text1}}>
+              {meta.sessionName} <span style={{color:T.text3,fontStyle:"italic"}}>· {meta.dateLabel}</span>
+            </div>
+            <div style={{fontSize:11,color:T.sage,fontStyle:"italic",fontFamily:T.serif,marginTop:4}}>
+              Logging from memory
+            </div>
+          </div>
+        </div>
+      </Fade>
+
+      {/* Hint about auto-fill — small, only relevant on first use */}
+      <Fade d={60}>
+        <div style={{padding:"16px 20px 0"}}>
+          <div style={{fontSize:11,color:T.text3,lineHeight:1.5,fontStyle:"italic",fontFamily:T.serif}}>
+            Defaults from the prescribed session. Tap any cell to adjust — the rest auto-fill until you override them. Skip what you didn&apos;t do.
+          </div>
+        </div>
+      </Fade>
+
+      {/* Exercise rows */}
+      <div style={{padding:"20px 20px 0",display:"flex",flexDirection:"column",gap:14}}>
+        {entries.map((entry, idx) => {
+          const isBwOnly      = entry.loadType === "bodyweight";
+          const isLoadedBw    = entry.loadType === "loaded_bodyweight";
+          const isAssistedBw  = entry.loadType === "assisted_bodyweight";
+          const showWeight    = !isBwOnly;
+          const weightUnit    = isLoadedBw ? "+ kg" : isAssistedBw ? "− kg" : "kg";
+
+          return (
+            <Fade key={entry.name + idx} d={120 + idx * 30}>
+              <div style={{
+                padding:"16px 18px 18px",
+                background: entry.skipped ? T.bg2 : T.bg2,
+                border: `1px solid ${entry.skipped ? T.bg3 : T.bg3}`,
+                borderRadius: T.r.lg,
+                opacity: entry.skipped ? 0.45 : 1,
+                transition: `opacity 180ms ${T.ease}`,
+              }}>
+                {/* Exercise name + skip toggle */}
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:10,marginBottom:10}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontFamily:T.serif,fontSize:18,fontWeight:300,lineHeight:1.2,color:T.text1}}>
+                      {entry.name}
+                    </div>
+                    <div style={{fontSize:10,color:T.text3,letterSpacing:"0.06em",marginTop:3}}>
+                      {entry.sets} × {entry.prescribed.reps} {entry.muscle ? `· ${entry.muscle}` : ""}
+                    </div>
+                  </div>
+                  <button onClick={() => toggleSkip(idx)}
+                    style={{flexShrink:0,padding:"6px 12px",background:entry.skipped?T.coral+"22":"transparent",border:`1px solid ${entry.skipped?T.coral+"55":T.bg4}`,borderRadius:T.r.pill,cursor:"pointer",fontFamily:T.sans,fontSize:11,color:entry.skipped?T.coral:T.text3,letterSpacing:"0.04em"}}>
+                    {entry.skipped ? "Skipped" : "Skip"}
+                  </button>
+                </div>
+
+                {!entry.skipped && (
+                  <>
+                    {/* Set cells — compact horizontal grid */}
+                    <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:12}}>
+                      {Array.from({length: entry.sets}).map((_, cellIdx) => {
+                        const value = showWeight ? entry.weights[cellIdx] : entry.reps[cellIdx];
+                        const display = value === null || value === undefined ? "—" : (typeof value === "string" ? value : String(value));
+                        return (
+                          <button key={cellIdx}
+                            onClick={() => setEditor({ exIdx: idx, cellIdx, kind: showWeight ? "weight" : "reps" })}
+                            style={{
+                              flex:1,
+                              padding:"10px 4px",
+                              background:T.bg3,
+                              border:`1px solid ${T.bg4}`,
+                              borderRadius:T.r.md,
+                              cursor:"pointer",
+                              fontFamily:T.serif,
+                              fontSize:18,
+                              fontWeight:300,
+                              color:T.text1,
+                              textAlign:"center",
+                            }}>
+                            {display}
+                          </button>
+                        );
+                      })}
+                      <span style={{fontFamily:T.serif,fontSize:11,fontWeight:300,color:T.text3,fontStyle:"italic",marginLeft:6,minWidth:32}}>
+                        {showWeight ? weightUnit : "reps"}
+                      </span>
+                    </div>
+
+                    {/* RPE selector — 3-point */}
+                    <div style={{display:"flex",gap:6}}>
+                      {[
+                        {id:"easy",  label:"Easy"},
+                        {id:"normal",label:"Normal"},
+                        {id:"cooked",label:"Cooked"},
+                      ].map(o => {
+                        const sel = entry.rpe === o.id;
+                        return (
+                          <button key={o.id} onClick={() => setRpe(idx, o.id)}
+                            style={{
+                              flex:1,
+                              padding:"8px 4px",
+                              background: sel ? `${T.coral}18` : T.bg3,
+                              border: `1px solid ${sel ? T.coral+"55" : T.bg4}`,
+                              borderRadius: T.r.sm,
+                              cursor:"pointer",
+                              fontFamily:T.sans,
+                              fontSize:12,
+                              fontWeight:500,
+                              color: sel ? T.coral : T.text3,
+                              letterSpacing:"0.02em",
+                            }}>
+                            {o.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            </Fade>
+          );
+        })}
+      </div>
+
+      {/* Submit bar — sticky bottom. Sage CTA: this is honest gap-filling,
+          not a training action, so semantically aligned with measurement. */}
+      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:430,padding:"16px 20px calc(20px + env(safe-area-inset-bottom))",background:`linear-gradient(to top,${T.bg0} 60%,transparent)`,zIndex:50}}>
+        <button
+          onClick={() => onSubmit({ exercises: entries })}
+          disabled={allSkipped}
+          style={{
+            width:"100%",
+            padding:"16px 24px",
+            background: allSkipped ? T.bg3 : T.sage,
+            border:"none",
+            borderRadius:T.r.lg,
+            cursor: allSkipped ? "default" : "pointer",
+            fontFamily:T.serif,
+            fontSize:18,
+            fontWeight:400,
+            color: allSkipped ? T.text4 : T.bg0,
+            boxShadow: allSkipped ? "none" : `0 8px 28px ${T.sage}26`,
+            display:"flex",alignItems:"center",justifyContent:"space-between",
+            transition:`all 200ms ${T.ease}`,
+          }}>
+          <span>{allSkipped ? "Skip everything?" : "Log session"}</span>
+          {!allSkipped && <span style={{fontSize:16}}>→</span>}
+        </button>
+      </div>
+
+      {/* Cell editor — single ScrollDrum bottom sheet */}
+      {editor !== null && (() => {
+        const entry = entries[editor.exIdx];
+        const isWeight = editor.kind === "weight";
+        const value = isWeight ? entry.weights[editor.cellIdx] : entry.reps[editor.cellIdx];
+        const numericValue = (() => {
+          if (typeof value === "number") return value;
+          if (typeof value === "string") {
+            const m = value.match(/^([0-9]+)/);
+            return m ? parseInt(m[1], 10) : 8;
+          }
+          return isWeight ? 60 : 8;
+        })();
+        const isLoadedBw    = entry.loadType === "loaded_bodyweight";
+        const isAssistedBw  = entry.loadType === "assisted_bodyweight";
+        const unit = isWeight ? (isLoadedBw ? "+ kg" : isAssistedBw ? "− kg" : "kg") : "reps";
+
+        return (
+          <div onClick={() => setEditor(null)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:500,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+            <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"24px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.bg3}`,animation:`slideUp 260ms ${T.ease}`}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18}}>
+                <div>
+                  <div style={{fontFamily:T.serif,fontSize:20,fontWeight:300,lineHeight:1.1}}>
+                    {entry.name}
+                  </div>
+                  <div style={{fontSize:12,color:T.text3,marginTop:4}}>
+                    Set {editor.cellIdx + 1} of {entry.sets}{editor.cellIdx === 0 ? " · auto-fills the rest" : ""}
+                  </div>
+                </div>
+                <button onClick={() => setEditor(null)} aria-label="Close" style={{background:T.bg3,border:`1px solid ${T.bg4}`,borderRadius:T.r.sm,padding:"6px 10px",cursor:"pointer",color:T.text2,fontSize:13}}>✕</button>
+              </div>
+
+              <div style={{display:"flex",justifyContent:"center",marginBottom:20}}>
+                <ScrollDrum
+                  value={numericValue}
+                  onChange={(v) => updateCell(editor.exIdx, editor.cellIdx, editor.kind, v)}
+                  step={isWeight ? 1.25 : 1}
+                  min={isWeight ? 0 : 1}
+                  max={isWeight ? 400 : 30}
+                  integer={!isWeight}
+                  unit={unit}
+                />
+              </div>
+
+              <button onClick={() => setEditor(null)}
+                style={{width:"100%",padding:"14px",background:T.coral,border:"none",borderRadius:T.r.lg,cursor:"pointer",fontFamily:T.serif,fontSize:16,fontWeight:400,color:T.bg0,boxShadow:`0 8px 28px ${T.strength.glow}`}}>
+                Done
+              </button>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
