@@ -14,5 +14,8 @@
     "next": "15.5.15",
     "react": "^18",
     "react-dom": "^18"
+  },
+  "overrides": {
+    "postcss": "^8.5.5"
   }
 }
