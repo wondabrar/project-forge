@@ -40,6 +40,7 @@ import {
   registerPasskey, authenticatePasskey, hasPasskey,
 } from "@/lib/webauthn";
 import { track } from "@vercel/analytics";
+import { computeVolumeAggregates } from "@/lib/analytics";
 import PerformanceLab from "@/components/PerformanceLab";
 import ErrorBoundary from "@/components/ErrorBoundary";
 
@@ -747,6 +748,22 @@ export default function ForgeApp(){
         } catch (e) {
           // Engine errors must never block session completion.
           console.error("[forge:progression]", e);
+        }
+      }
+      // ──────────────────────────────────────────────────────────────────
+
+      // ─── Phase 4: silent volume tracking ──────────────────────────────
+      // After every session, recompute rolling 7/14/28-day volume aggregates +
+      // a 16-week baseline, persist to TS.volume. No UI consumes this yet —
+      // it's infrastructure for future Performance Lab visualisations and for
+      // Phase 5+ fatigue tuning. Errors silently logged, never blocking.
+      if (sessionRecord) {
+        try {
+          const fullHistory = H.get(activeProfile);
+          const aggregates = computeVolumeAggregates(fullHistory);
+          TS.updateVolume(activeProfile, aggregates);
+        } catch (e) {
+          console.error("[forge:volume-tracking]", e);
         }
       }
       // ──────────────────────────────────────────────────────────────────
