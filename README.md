@@ -1,139 +1,161 @@
-# forge-recovery-and-polish
+# forge-retrospective-logging
 
-**Two jobs in one patch — restores Phase 3 + 4 work that the v0 BW PR clobbered, AND ships the BW polish pass on top.**
+**Single-screen retrospective logging for missed sessions in the last 3 days.**
 
-Combined into one zip because the polish work was built on top of the recovery base. They're indivisible — merging the polish without the recovery would require rebasing, and shipping them as separate patches creates a window where the polish-only diff is missing context. Single PR is cleaner and safer.
-
-## What this restores (recovery)
-
-The earlier v0 BW-after-name PR was created from a stale base that predated Phase 3 and Phase 4 merges. When merged into main, it brought old `lib/progression.js`, `lib/storage.js`, and `lib/analytics.js` files — wiping ~660 lines of Phase 3 + Phase 4 logic. The app continued to function via the surviving Phase 2 engine, but the deload offer system and silent volume tracking were gone.
-
-This patch restores:
-
-- **Phase 3 (signal-driven deload + recovery rebuild)** — 469 lines back into `lib/progression.js`
-- **Phase 3 schema additions** — `TS.updateMesocycle`, `TS.replaceState`, `lastOfferDismissedAt` field added to `lib/storage.js`
-- **Phase 4 (rolling volume aggregates)** — 196 lines back into `lib/analytics.js` + the existing `weeklyVolume()` `effectiveLoad` bug fix
-- **Phase 3 + 4 wire-ins in `components/ForgeApp.jsx`** — imports, state declarations, profile-activation hydration, session-finalise auto-completion + prescription branching, home-screen deload card, session-screen "deload · day N of M" subtitle, Done-screen "Deload complete. Welcome back." line
-
-What's preserved from current main:
-- ✅ v0's BW-after-name onboarding flow
-- ✅ Library expansion (88 exercises across 14 pools)
-- ✅ Profile gap fix (15 explicit lift profiles)
-- ✅ Phase 2 progression engine
-- ✅ Phase 2 schema helpers
-
-## What this polishes (the seven items from the code review)
-
-### 1. ScrollDrum: respect `unit` prop for bottom label
-
-The component had a hardcoded `integer ? "reps" : "kg"` at the bottom that ignored the `label` prop entirely. Added a separate `unit` prop that the bottom label respects, defaulting to the previous behaviour. Now `unit="+ kg"` for loaded bodyweight or `unit="− kg"` for assisted will display correctly.
-
-```js
-function ScrollDrum({value, onChange, ..., label="", unit=null})
-```
-
-`label` is the optional uppercase top label (kept as-is). `unit` is the italic bottom label (new). Backwards-compatible.
-
-### 2. BW modal aesthetic redesign
-
-The previous modal felt "off" because it used the **coral** action colour (semantically reserved for training surfaces) on what is fundamentally a passive measurement update. Plus a long descriptive paragraph that worked for first-time onboarding but was noise on every subsequent edit.
-
-Redesigned to match the editorial pattern of `DrumEditOverlay` (the gold standard for ScrollDrum-based bottom sheets):
-
-- ✕ close button top-right (replaces the separate "Cancel" button — one tap zone, less visual weight)
-- Tighter Fraunces 22px header "Bodyweight" + 12px subtitle
-- Subtitle is **context-aware**: first-time entry shows "Used for loaded pull-ups, dips, and other weighted bodyweight movements" (the explanatory copy that matters once); subsequent edits show "Scroll to adjust" (matches DrumEditOverlay exactly)
-- **Sage CTA** ("Confirm →") instead of coral — semantically aligned with wellness/measurement rather than training
-- Single-button stack (vs. previous Save + Cancel vertical pair)
-
-The post-claim BW step in `ProfileScreen` got the same coral → sage treatment for consistency: kicker, save button, ambient glow all switched. Same family across both surfaces — the modal is the bottom-sheet variant, the post-claim step is the full-screen variant, both unmistakably "bodyweight" territory.
-
-### 3. Post-set BW prompt timing refactor
-
-Was: `setTimeout(() => setBwEditOpen(true), 600)` — a 600ms hard-coded delay that left ~350ms of "nothing happening" between the RPE card finishing its fade-out animation (~250ms) and the BW modal sliding up.
-
-Now: 280ms — tuned to match the RPE card's fade-out duration so the BW modal starts sliding up just as the RPE card finishes dismissing. Smooth handoff, no awkward gap. Comment added explaining the dependency on RPE animation timing.
-
-(A full callback-based solution that fires on the RPE card's `onAnimationEnd` would be architecturally cleaner, but that requires changes to `RpeCard` and adds prop-drilling complexity. The tuned timer hits the same UX outcome with less surface area to maintain.)
-
-### 4. `loadType` deduplication
-
-Was: two separate call sites — `pushSetToDraft` (for set logging) and `SessionScreen` (for display logic) — each independently computing `ex.loadType || inferLoadType(ex.name)`.
-
-Now: small shared helper `getLoadType(ex)` defined near the top of the file. Both call sites use it. Single source of truth, can't drift.
-
-```js
-function getLoadType(ex) {
-  return ex?.loadType || inferLoadType(ex?.name);
-}
-```
-
-### 5. `ProfileScreen` `updateBodyweight` defensive guard
-
-Was: silent no-op if `activeProfile` was null (theoretical race during onboarding). The reviewer flagged "worth adding a guard or logging."
-
-Now: the guard explicitly logs the no-op via `console.warn` so the edge case is visible in DevTools rather than failing invisibly. If users ever report "I entered my BW but it didn't save," the console will show why.
-
-### 6. `activeEx?.name` null safety
-
-Was: `onClick={()=>setEditTarget({exName:activeEx.name, ...})}` — would throw if `activeEx` was null in a race condition (defensive edge case).
-
-Now: `onClick={()=>{ if(activeEx?.name) setEditTarget({...}); }}` — defensive guard, no-ops cleanly. Two click handlers updated (weight picker + reps picker).
-
-### 7. PostCSS lockfile (item #1)
-
-Already resolved per the review (sandbox auto-regenerated, 0 vulnerabilities). No change needed.
+Rapid-recall data entry optimised for the "I forgot to log Friday" moment. Pre-populates from the programme rotation for the selected date, auto-fills cells across sets, single RPE per exercise, no readiness modal, no rest timers. The engine treats the resulting record identically to a live session — same prescription decisions, same Phase 3 deload signals, same Phase 4 volume aggregates.
 
 ## Files changed
 
 ```
-lib/progression.js          # 527 → 996 lines    (Phase 3 logic restored)
-lib/storage.js              # 1144 → 1164 lines  (Phase 3 helpers + lastOfferDismissedAt)
-lib/analytics.js            # 212 → 414 lines    (Phase 4 + weeklyVolume bug fix)
-components/ForgeApp.jsx     # 2719 → 2945 lines  (Phase 3+4 wire-ins + 7 polish items)
+lib/programme.js            # 440 → 555 lines  (3 new pure helpers + JS_DAY_TO_WEEK_INDEX constant)
+components/ForgeApp.jsx     # 2945 → 3615 lines  (state, handlers, RetroPickerSheet, RetrospectiveSessionSheet, home link, toast)
 ```
 
-`lib/programme.js` and `lib/lift-translations.js` are NOT included — current main has the library expansion + profile gap fix intact and untouched.
+Build: 42.2 kB → **46 kB** main route (+3.8 kB for the entire flow — picker + full-screen sheet + handler + helpers).
 
-Build: 42.2 kB main route (unchanged from recovery — polish is wash on bundle size).
+## What the user sees
+
+### Home screen
+
+A subtle sage link appears beneath the recovery nudge area, **only when the engine detects a missed strength day in the last 3 calendar days**:
+
+> Missed a session? *Log it* →
+
+If the user trained every recent strength day, the link stays hidden — home stays calm. The visibility is fully data-driven via `hasMissedStrength(history, 3)`.
+
+If a live draft is already open, the link is hidden (can't retro-log mid-session). If the picker were tapped during a draft, the picker would show "Finish your live session first" instead.
+
+### Picker bottom sheet
+
+Tapping the link opens a sage-trimmed bottom sheet listing the last 3 days. Each row shows:
+
+- Date label (e.g. "Fri 24 Apr")
+- Expected session per programme rotation (e.g. "Strength C")
+- Status: ✓ logged (sage tick, dimmed, non-tappable) | tappable arrow (coral) | non-strength label (rest/cardio/zone2/hiit, dimmed)
+
+**Only missed strength days are tappable.** Already-logged dates blocked with a sage tick. Non-strength days show as context but can't be tapped.
+
+Footer microcopy: *"Only the last 3 days. Anything older is archaeology."*
+
+### Retrospective session sheet
+
+Tapping a missed day opens a full-screen form with the entire prescribed session laid out top-to-bottom. Header shows session name + date + a sage italic "Logging from memory" subtitle.
+
+For each exercise:
+
+- Exercise name (Fraunces) + sets × reps + muscle group
+- "Skip" toggle (top-right) — toggling dims the exercise to 45% opacity and excludes it from the session record
+- **Compact horizontal grid of cells** — one cell per set, defaulting to the prescribed weight (or reps for bodyweight movements). Tap any cell to open a single-cell ScrollDrum overlay
+- **Auto-fill on first cell**: changing cell 1 propagates to cells 2..N IF those cells haven't been individually edited. Touching a non-first cell only changes that cell. This means a user who hit prescription cleanly only taps cell 1 once
+- 3-point RPE selector below (Easy / Normal / Cooked, defaults to Normal)
+- Loaded BW exercises show "+ kg" units; assisted "− kg"; pure BW only collects reps
+
+The ScrollDrum overlay shows "Set N of M · auto-fills the rest" on cell 1 so the auto-fill behaviour is discoverable.
+
+Bottom: a sticky **sage** "Log session →" CTA. Sage because retro logging is honest gap-filling (wellness/measurement territory), not coral training-action. Disabled state: "Skip everything?" — if all exercises skipped.
+
+### After submission
+
+A small sage toast slides down from the top: *"Logged Strength C for Fri 24 Apr"* — auto-dismisses after 3 seconds, tappable to dismiss early. Full DoneScreen would be jarring for rapid-fire retro entry — the toast pattern matches the "I'm catching up on three sessions" mental model.
+
+## How it works under the hood
+
+### The data pipeline
+
+The handler `handleSubmitRetro` builds a session record that looks identical to a live one save for the `retrospective: true` flag and the date overrides:
+
+1. `newDraftLog()` builds the standard v2 draft with `mesocyclePhase: "accumulation"` (or `"deload"` if a deload is active)
+2. Override `id`, `date`, `dow`, `startedAt` to anchor to the SELECTED date at noon UTC. Noon-anchor avoids DST edge cases when the draft is built/finalised in different timezones
+3. Set `retrospective: true` and `loggedAt: now` so we can later differentiate retro from live records
+4. For each non-skipped exercise, walk the cells and call `logSet()` with weight/reps/RPE — same as a live session
+5. `finaliseDraft()` produces the session record (the `retrospective` flag survives via the `...rest` spread)
+6. `H.append()` adds to history — the array is sorted by `id`, so retro records land in correct chronological position relative to live records
+
+### Engine compatibility — verified end-to-end
+
+The same `Phase 2 + 3 + 4` engine block that runs on live session finalise runs on retro submission:
+
+- **Phase 2 progression**: reads top-set RPE from the session record, produces ADD/HOLD/DROP — works identically on retro records
+- **Phase 3 deload signals**: cooked accumulation, stall convergence, regression detection all use date-based windows — retro records land in the correct date bucket
+- **Phase 3 auto-completion**: edge case where a retro session crosses the deload threshold (>4 days from deload start) — handled correctly
+- **Phase 4 volume aggregates**: simple sum of `set.volume` per muscle in date windows — agnostic to retro vs live
+
+E2E tests verify all of the above.
+
+### The two intentional engine compromises
+
+Per the design discussion (deliberately accepted, not bugs):
+
+1. **No readiness collected for retro sessions.** Default is `"normal"`. This means retro sessions can't trigger the Phase 2 cooked override (the "if cooked, never ADD" rule), and don't contribute to Phase 3's "3 cooked in 14 days" signal. RPE is still collected, which is the higher-value engine input. Trade-off accepted: asking "how did Friday feel?" three days later is worse data than not asking.
+
+2. **Muscle anchor updates apply as if the retro session were today's PR.** A 110kg squat retro-logged from Friday becomes the user's "current" Quadriceps anchor the moment they save. Strength doesn't decay in 3 days, so this is fine — but worth knowing if any future debugging looks at anchor timestamps.
+
+### State architecture
+
+Three new pieces of state in ForgeApp:
+
+```js
+const [retroPickerOpen, setRetroPickerOpen] = useState(false);
+const [retroDate,       setRetroDate]       = useState(null); // ISO YYYY-MM-DD or null
+const [retroToast,      setRetroToast]      = useState(null); // { date, sessionName } or null
+```
+
+One new screen path: `screen === "retro"` renders `RetrospectiveSessionSheet`. Otherwise unchanged.
+
+One memoised derived value:
+
+```js
+const hasRetroGaps = useMemo(() => hasMissedStrength(history, 3), [history]);
+```
+
+Recomputes automatically as history grows. Drives whether the home link is visible.
+
+## What's locked vs what's queued
+
+**Locked (in this patch):**
+
+- 3-day rolling window — anything older is intentionally not surfaceable
+- Block already-logged dates (sage ✓, non-tappable)
+- Block future dates (not in the picker at all)
+- Block during live draft (link hidden, picker shows "finish your live session first")
+- Streak healing (automatic — H.append + sort means retro records contribute to rhythm naturally)
+- Single RPE per exercise applied to all sets
+- Auto-fill on first cell with per-cell override tracking
+- Skip toggle per exercise
+- Sage CTA for "Log session" (semantic: this is gap-filling, not training)
+
+**Not built:**
+
+- Readiness collection for retro (deliberately skipped — 3-day-old recall is fake precision)
+- BW prompt during retro (deliberately skipped — already in fudge-from-memory mode, friction not worth it)
+- Done screen for retro (deliberately replaced with toast — celebration patterns don't fit rapid-fire entry)
+- Editing already-logged sessions (deliberately blocked — overwrite is a foot-gun)
 
 ## Verification
 
-- ✅ Babel parse clean across all 4 files
+- ✅ Babel parse clean across both files
 - ✅ `next build` clean — 0 warnings, 0 errors
-- ✅ Phase 3 unit tests pass (signal detection, cooldowns, deload prescriptions, state transitions, copy generators, recovery rebuild)
-- ✅ Phase 4 unit tests pass (window selection, aggregation, baselines, deltas)
-- ✅ Spot-checked all 7 polish items render/behave correctly
+- ✅ All 13 helper unit tests pass (`sessionMetaForDate`, `findRecentDays`, `hasMissedStrength`)
+- ✅ All 13 E2E tests pass (draft build, finaliseDraft preservation, engine compatibility, history sort, post-submit detection)
+- ✅ Phase 3 + Phase 4 functions called in the retro engine block — same code path as live finalise
 
 ## Test checklist (post-deploy)
 
-**Recovery verification:**
-
-- [ ] DevTools → Sources → confirm `lib/progression.js` source has `computeDeloadPrescription` defined
-- [ ] After logging a session, `forge:<profile>:trainingState.volume` should populate with `last7Days`, `last14Days`, `last28Days`, `baseline28d`
-- [ ] To force the deload card visible: edit LS to set 2+ lifts' `stallSignal: "stall"`, clear `mesocycle.deloadSignals.lastDeloadCompletedAt`, reload home → sage card should appear
-
-**Polish verification:**
-
-- [ ] Tap "Bodyweight" row in profile sheet → bottom-sheet modal slides up with sage "Confirm →" CTA, ✕ close top-right
-- [ ] First-time bodyweight prompt during a pull-up session → modal subtitle reads "Used for loaded pull-ups…"
-- [ ] Re-edit existing bodyweight from home card → subtitle reads "Scroll to adjust" (same as DrumEditOverlay)
-- [ ] BW prompt during session → modal appears ~280ms after RPE pick (no awkward gap)
-- [ ] First-time onboarding → post-claim BW step has sage glow + sage button (not coral)
-
-## How to prevent the v0 PR clobber pattern
-
-When opening any v0 PR, before merging:
-
-1. Check `git diff origin/main...HEAD -- lib/ components/` shows ONLY the changes the PR description mentions
-2. If the diff includes hundreds of lines of *removed* code from files the PR didn't claim to touch — that's the stale-base signal
-3. Either: rebase the v0 branch onto current main first, or cherry-pick just the intended changes onto a fresh branch
-
-This is the second time a v0 branch has shipped stale code (per memory: an earlier session diagnosed a redeployed older commit). Worth treating v0 PRs as "review the diff carefully" by default rather than fast-merge.
+- [ ] Open app on Mon morning with Friday unlogged → home shows "Missed a session? Log it →" link
+- [ ] Tap the link → picker shows Fri (tappable, coral arrow), Sat (HIIT, dimmed), Sun (Rest, dimmed)
+- [ ] Tap Fri → full-screen retro sheet opens with all Strength C exercises pre-filled
+- [ ] Tap any cell → ScrollDrum slides up, scrubbing updates that cell
+- [ ] Cell 1 update auto-propagates to cells 2/3 (until you tap them individually)
+- [ ] Tap "Skip" on any exercise → it dims to 45% opacity and gets excluded from the record
+- [ ] Tap "Log session →" → toast slides down "Logged Strength C for Fri 24 Apr", picker no longer shows Fri as missed
+- [ ] DevTools → Local Storage → `forge:<profile>:history` has a record with `date: "2026-04-24"`, `retrospective: true`, `loggedAt` ≈ now
+- [ ] After retro, log a live session → the engine's prescription respects the retro session as recent history
+- [ ] Try to retro a date that's already logged → not in the picker as tappable (shows ✓)
+- [ ] Open picker during a live draft → all rows greyed, footnote "Finish your live session first"
 
 ## What's still queued for polish (post this patch)
 
-- **Copy polish** — small wording adjustments, voice consistency pass
-- **Passkey nudge** — discoverability nudge for users who haven't set up cross-device auth (option A: inline post-claim screen with "Secure this account" / "Not now"; option B: home screen sage chip)
+- Copy polish — small wording adjustments, voice consistency pass
+- Passkey nudge — discoverability for users who haven't set up cross-device auth
 
-Neither is launch-blocking. Both can land after the May launch if needed.
+Neither blocks May launch.
