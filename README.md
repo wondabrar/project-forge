@@ -1,161 +1,187 @@
-# forge-retrospective-logging
+# forge-passkey-nudge
 
-**Single-screen retrospective logging for missed sessions in the last 3 days.**
+**Three-surface passkey discoverability — onboarding step + escalating home nudge.**
 
-Rapid-recall data entry optimised for the "I forgot to log Friday" moment. Pre-populates from the programme rotation for the selected date, auto-fills cells across sets, single RPE per exercise, no readiness modal, no rest timers. The engine treats the resulting record identically to a live session — same prescription decisions, same Phase 3 deload signals, same Phase 4 volume aggregates.
+Closes the orphaned-account UX gap. Before this patch, the only way to discover the passkey feature after onboarding was to open the profile sheet (most users never do). After this patch, every new user gets a proactive consent moment during onboarding, and any user who skipped gets a visible reminder on home that escalates by surface (not frequency) over time.
 
 ## Files changed
 
 ```
-lib/programme.js            # 440 → 555 lines  (3 new pure helpers + JS_DAY_TO_WEEK_INDEX constant)
-components/ForgeApp.jsx     # 2945 → 3615 lines  (state, handlers, RetroPickerSheet, RetrospectiveSessionSheet, home link, toast)
+lib/storage.js              # 1164 → 1225 lines  (PN helper + PN_SNOOZE_MS constant)
+components/ForgeApp.jsx     # 3615 → 3887 lines  (state, handlers, onboarding step, chip + card, success toast)
 ```
 
-Build: 42.2 kB → **46 kB** main route (+3.8 kB for the entire flow — picker + full-screen sheet + handler + helpers).
+Build: 46 → **47.2 kB** main route (+1.2 kB for the entire passkey nudge system).
 
 ## What the user sees
 
-### Home screen
+### Onboarding (first-time only, WebAuthn-supported devices only)
 
-A subtle sage link appears beneath the recovery nudge area, **only when the engine detects a missed strength day in the last 3 calendar days**:
+After name claim, before BW step, a sage-themed full-screen prompt:
 
-> Missed a session? *Log it* →
+> SECURE ACROSS DEVICES
+>
+> # Add a *passkey*?
+>
+> Without one, your data lives only on this device — clearing your browser would lose everything.
+>
+> With one, your name is yours across phone, laptop, anywhere. Face ID, Touch ID, or your device PIN.
+>
+> **[ Add passkey → ]**
+>
+> *Later*
 
-If the user trained every recent strength day, the link stays hidden — home stays calm. The visibility is fully data-driven via `hasMissedStrength(history, 3)`.
+Three exit paths all advance to the BW step — onboarding never breaks:
 
-If a live draft is already open, the link is hidden (can't retro-log mid-session). If the picker were tapped during a draft, the picker would show "Finish your live session first" instead.
+1. **User accepts and ceremony succeeds** — passkey registered, advance to BW
+2. **User accepts but cancels/fails the OS prompt** — soft error message in-place ("Setup didn't complete. Try again or skip for now."), user controls retry vs skip; on skip via "Later" they advance
+3. **User taps "Later"** — silent advance, no error
 
-### Picker bottom sheet
+**Capability gate**: If WebAuthn isn't supported on this device, the onboarding step is bypassed entirely. Direct claim → BW. No point asking for something the device can't do.
 
-Tapping the link opens a sage-trimmed bottom sheet listing the last 3 days. Each row shows:
+### Home — chip phase (days 0-3 from profile creation)
 
-- Date label (e.g. "Fri 24 Apr")
-- Expected session per programme rotation (e.g. "Strength C")
-- Status: ✓ logged (sage tick, dimmed, non-tappable) | tappable arrow (coral) | non-strength label (rest/cardio/zone2/hiit, dimmed)
+If the user skipped onboarding without registering, a subtle inline link appears:
 
-**Only missed strength days are tappable.** Already-logged dates blocked with a sage tick. Non-strength days show as context but can't be tapped.
+> *Secure your name across devices →*  ✕
 
-Footer microcopy: *"Only the last 3 days. Anything older is archaeology."*
+- Tapping the link runs the WebAuthn ceremony directly from home (no detour through profile sheet)
+- Tapping ✕ snoozes the nudge for 7 days
+- Sage-tinted, no card chrome — reads as a discoverability cue, not an interruption
+- Hidden if profile already has a passkey, or device doesn't support WebAuthn, or snoozed
 
-### Retrospective session sheet
+### Home — card phase (days 4+ from profile creation)
 
-Tapping a missed day opens a full-screen form with the entire prescribed session laid out top-to-bottom. Header shows session name + date + a sage italic "Logging from memory" subtitle.
+After 4 days, the chip escalates to a sage card with explicit consequence framing:
 
-For each exercise:
+> SECURE ACROSS DEVICES
+>
+> ## Add a passkey
+>
+> Without one, your data lives only on this device. Face ID, Touch ID, or your device PIN — takes a second.
+>
+> **[ Set up passkey → ]**
 
-- Exercise name (Fraunces) + sets × reps + muscle group
-- "Skip" toggle (top-right) — toggling dims the exercise to 45% opacity and excludes it from the session record
-- **Compact horizontal grid of cells** — one cell per set, defaulting to the prescribed weight (or reps for bodyweight movements). Tap any cell to open a single-cell ScrollDrum overlay
-- **Auto-fill on first cell**: changing cell 1 propagates to cells 2..N IF those cells haven't been individually edited. Touching a non-first cell only changes that cell. This means a user who hit prescription cleanly only taps cell 1 once
-- 3-point RPE selector below (Easy / Normal / Cooked, defaults to Normal)
-- Loaded BW exercises show "+ kg" units; assisted "− kg"; pure BW only collects reps
+- Same in-place ceremony as the chip — tap the button, run WebAuthn, no detour
+- ✕ in the corner snoozes for 7 days
+- After day 4, **the card stays static**. Repeated dismissals don't escalate further. No nagging theatre.
 
-The ScrollDrum overlay shows "Set N of M · auto-fills the rest" on cell 1 so the auto-fill behaviour is discoverable.
+### Success toast
 
-Bottom: a sticky **sage** "Log session →" CTA. Sage because retro logging is honest gap-filling (wellness/measurement territory), not coral training-action. Disabled state: "Skip everything?" — if all exercises skipped.
+After successful passkey registration (from any surface), a sage toast slides down:
 
-### After submission
+> Passkey added. *Your name's secure now.*
 
-A small sage toast slides down from the top: *"Logged Strength C for Fri 24 Apr"* — auto-dismisses after 3 seconds, tappable to dismiss early. Full DoneScreen would be jarring for rapid-fire retro entry — the toast pattern matches the "I'm catching up on three sessions" mental model.
+3-second auto-dismiss, tappable to dismiss early. Same toast pattern as the retro logging completion.
 
 ## How it works under the hood
 
-### The data pipeline
+### State model
 
-The handler `handleSubmitRetro` builds a session record that looks identical to a live one save for the `retrospective: true` flag and the date overrides:
+A new per-profile LS record drives the nudge:
 
-1. `newDraftLog()` builds the standard v2 draft with `mesocyclePhase: "accumulation"` (or `"deload"` if a deload is active)
-2. Override `id`, `date`, `dow`, `startedAt` to anchor to the SELECTED date at noon UTC. Noon-anchor avoids DST edge cases when the draft is built/finalised in different timezones
-3. Set `retrospective: true` and `loggedAt: now` so we can later differentiate retro from live records
-4. For each non-skipped exercise, walk the cells and call `logSet()` with weight/reps/RPE — same as a live session
-5. `finaliseDraft()` produces the session record (the `retrospective` flag survives via the `...rest` spread)
-6. `H.append()` adds to history — the array is sorted by `id`, so retro records land in correct chronological position relative to live records
-
-### Engine compatibility — verified end-to-end
-
-The same `Phase 2 + 3 + 4` engine block that runs on live session finalise runs on retro submission:
-
-- **Phase 2 progression**: reads top-set RPE from the session record, produces ADD/HOLD/DROP — works identically on retro records
-- **Phase 3 deload signals**: cooked accumulation, stall convergence, regression detection all use date-based windows — retro records land in the correct date bucket
-- **Phase 3 auto-completion**: edge case where a retro session crosses the deload threshold (>4 days from deload start) — handled correctly
-- **Phase 4 volume aggregates**: simple sum of `set.volume` per muscle in date windows — agnostic to retro vs live
-
-E2E tests verify all of the above.
-
-### The two intentional engine compromises
-
-Per the design discussion (deliberately accepted, not bugs):
-
-1. **No readiness collected for retro sessions.** Default is `"normal"`. This means retro sessions can't trigger the Phase 2 cooked override (the "if cooked, never ADD" rule), and don't contribute to Phase 3's "3 cooked in 14 days" signal. RPE is still collected, which is the higher-value engine input. Trade-off accepted: asking "how did Friday feel?" three days later is worse data than not asking.
-
-2. **Muscle anchor updates apply as if the retro session were today's PR.** A 110kg squat retro-logged from Friday becomes the user's "current" Quadriceps anchor the moment they save. Strength doesn't decay in 3 days, so this is fine — but worth knowing if any future debugging looks at anchor timestamps.
-
-### State architecture
-
-Three new pieces of state in ForgeApp:
-
-```js
-const [retroPickerOpen, setRetroPickerOpen] = useState(false);
-const [retroDate,       setRetroDate]       = useState(null); // ISO YYYY-MM-DD or null
-const [retroToast,      setRetroToast]      = useState(null); // { date, sessionName } or null
+```ts
+forge:<profile>:passkeyNudge = {
+  createdAt: ISO timestamp,    // set on profile claim, never overwritten
+  snoozedUntil: ISO | null,    // set to now+7d on manual dismiss
+}
 ```
 
-One new screen path: `screen === "retro"` renders `RetrospectiveSessionSheet`. Otherwise unchanged.
+The `PN.stage(profile)` function returns `"chip" | "card" | "hidden"`:
 
-One memoised derived value:
+- Active snooze (snoozedUntil > now) → **hidden**
+- No record → **hidden** (caller is responsible for `PN.init` on profile claim)
+- Age < 4 days → **chip**
+- Age ≥ 4 days → **card**
+
+Notably, `PN` doesn't know about `hasPasskey()` — that's the caller's job. ForgeApp checks both `pnStage` AND `pnHasPasskey` before rendering. This separation means the snooze logic is testable without mocking the WebAuthn API.
+
+### Hydration on profile activation
+
+On every profile activation, the `useEffect` block calls:
 
 ```js
-const hasRetroGaps = useMemo(() => hasMissedStrength(history, 3), [history]);
+PN.init(activeProfile);                    // idempotent — only seeds if missing
+setPnStage(PN.stage(activeProfile));        // initial stage from LS
+
+isPlatformAuthenticatorAvailable().then(supported => {
+  setPnWebAuthnSupported(supported);
+  if (!supported) setPnStage("hidden");     // capability gate
+});
+
+hasPasskey(activeProfile).then(has => {
+  setPnHasPasskey(has);
+  if (has) setPnStage("hidden");            // already-secured gate
+});
 ```
 
-Recomputes automatically as history grows. Drives whether the home link is visible.
+The two async checks run in parallel and both can independently force the stage to hidden. No race conditions because we only ever transition TO hidden, never away from it.
 
-## What's locked vs what's queued
+### The handler trio
 
-**Locked (in this patch):**
+Three handlers in ForgeApp:
 
-- 3-day rolling window — anything older is intentionally not surfaceable
-- Block already-logged dates (sage ✓, non-tappable)
-- Block future dates (not in the picker at all)
-- Block during live draft (link hidden, picker shows "finish your live session first")
-- Streak healing (automatic — H.append + sort means retro records contribute to rhythm naturally)
-- Single RPE per exercise applied to all sets
-- Auto-fill on first cell with per-cell override tracking
-- Skip toggle per exercise
-- Sage CTA for "Log session" (semantic: this is gap-filling, not training)
+- `handleRegisterPasskeyFromHome` — runs the WebAuthn ceremony directly. On success: hides nudge forever, fires success toast. On user cancellation: silent 7-day snooze (cancellation isn't a failure). On error: surface message, don't auto-snooze (let user retry).
+- `handleSnoozeNudge` — manual dismiss. 7-day snooze.
+- The onboarding step uses its own local handlers (`handlePasskeyAccept`, `handlePasskeyLater`) inside ProfileScreen — separate state because the onboarding ceremony has different error-handling semantics (in-place retry vs falling back to chip on home).
 
-**Not built:**
+### What's intentionally NOT escalated
 
-- Readiness collection for retro (deliberately skipped — 3-day-old recall is fake precision)
-- BW prompt during retro (deliberately skipped — already in fudge-from-memory mode, friction not worth it)
-- Done screen for retro (deliberately replaced with toast — celebration patterns don't fit rapid-fire entry)
-- Editing already-logged sessions (deliberately blocked — overwrite is a foot-gun)
+A few things I considered but rejected:
+
+- **Showing the card every 3 days within a 7-day window** — frequency escalation teaches users to dismiss without reading. Same content reappearing more often becomes wallpaper. The chip→card surface escalation creates ONE genuine new prompt.
+- **A second escalation tier (like a modal blocker)** — too aggressive for a feature the user can legitimately not want. After day 7, the card stays static.
+- **Tracking dismiss count and escalating after N dismissals** — same reasoning. If they've dismissed it once consciously, that's data. Punishing them isn't.
+
+### Cleanup
+
+Folded in v0's flagged redundancy from the retro logging review (lines 3163-3164 had identical `T.bg2` / `T.bg3` for both skipped and non-skipped — ternary did nothing). Removed the conditionals, kept the literal values.
 
 ## Verification
 
 - ✅ Babel parse clean across both files
 - ✅ `next build` clean — 0 warnings, 0 errors
-- ✅ All 13 helper unit tests pass (`sessionMetaForDate`, `findRecentDays`, `hasMissedStrength`)
-- ✅ All 13 E2E tests pass (draft build, finaliseDraft preservation, engine compatibility, history sort, post-submit detection)
-- ✅ Phase 3 + Phase 4 functions called in the retro engine block — same code path as live finalise
+- ✅ All 10 PN unit tests pass (init, stage transitions, snooze cooldown, idempotency, edge cases)
+- ✅ All 9 flow tests pass (fresh user, dismiss/escalate, accept-from-onboarding, accept-from-home, day-3.99 vs day-4 boundary)
 
 ## Test checklist (post-deploy)
 
-- [ ] Open app on Mon morning with Friday unlogged → home shows "Missed a session? Log it →" link
-- [ ] Tap the link → picker shows Fri (tappable, coral arrow), Sat (HIIT, dimmed), Sun (Rest, dimmed)
-- [ ] Tap Fri → full-screen retro sheet opens with all Strength C exercises pre-filled
-- [ ] Tap any cell → ScrollDrum slides up, scrubbing updates that cell
-- [ ] Cell 1 update auto-propagates to cells 2/3 (until you tap them individually)
-- [ ] Tap "Skip" on any exercise → it dims to 45% opacity and gets excluded from the record
-- [ ] Tap "Log session →" → toast slides down "Logged Strength C for Fri 24 Apr", picker no longer shows Fri as missed
-- [ ] DevTools → Local Storage → `forge:<profile>:history` has a record with `date: "2026-04-24"`, `retrospective: true`, `loggedAt` ≈ now
-- [ ] After retro, log a live session → the engine's prescription respects the retro session as recent history
-- [ ] Try to retro a date that's already logged → not in the picker as tappable (shows ✓)
-- [ ] Open picker during a live draft → all rows greyed, footnote "Finish your live session first"
+**Onboarding:**
 
-## What's still queued for polish (post this patch)
+- [ ] New user, name claim → passkey screen with "Add passkey" / "Later"
+- [ ] Tap "Add passkey", complete OS prompt → BW step opens, profile has passkey
+- [ ] Tap "Add passkey", cancel OS prompt → soft error in-place, can retry or tap "Later"
+- [ ] Tap "Later" → BW step opens, no passkey, home will surface chip tomorrow
+- [ ] On a non-WebAuthn device (rare, e.g. some embedded webviews) → no passkey screen, direct to BW
 
-- Copy polish — small wording adjustments, voice consistency pass
-- Passkey nudge — discoverability for users who haven't set up cross-device auth
+**Home — chip phase:**
 
-Neither blocks May launch.
+- [ ] User who skipped passkey onboarding sees chip on home: "Secure your name across devices →"
+- [ ] Tap chip → OS prompt → success toast → chip vanishes forever
+- [ ] Tap ✕ → chip vanishes for 7 days
+- [ ] Wait 7 days, reload → chip returns
+- [ ] LS: `forge:<name>:passkeyNudge.createdAt` set on profile claim, `snoozedUntil` set on dismiss
+
+**Home — card phase:**
+
+- [ ] After 4 days from claim (or simulate by editing `createdAt` in DevTools to be 5 days ago) → chip is replaced by sage card with "Without one, your data lives only on this device" copy
+- [ ] Tap card button → same OS prompt + success flow as chip
+- [ ] Tap ✕ → 7-day snooze, card returns after that
+
+**Edge cases:**
+
+- [ ] Profile with passkey already set → no nudge, ever (regardless of `pnStage` value)
+- [ ] Multiple profile switching → each profile's nudge state is independent (LS keyed by profile)
+
+## What's next
+
+Nothing on the polish queue. Ready for May launch.
+
+The two queued items (copy polish + passkey nudge) are both addressed: copy was already solid, passkey nudge ships in this patch. Future work:
+
+- Retrospective logging is already shipped (post-launch trigger criteria in earlier README — 2+ users complaining)
+- Phase 5+ ML-driven adjustments (long-tail, post-data)
+- Performance Lab volume visualisations (turn on Phase 4's silent infrastructure)
+- Rep-range cycling logic
+
+All post-launch.

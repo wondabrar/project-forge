@@ -10,7 +10,7 @@ import {
   sessionMetaForDate, findRecentDays, hasMissedStrength,
 } from "@/lib/programme";
 import {
-  LS, P, PB, H, BW, bumpStreak,
+  LS, P, PB, H, BW, PN, bumpStreak,
   computeRhythm, detectRecoveryPattern,
   blobPush, flushPendingPushes, getLocalProfile, backgroundSync, SyncStatus,
   enableAutoSync, disableAutoSync,
@@ -296,6 +296,20 @@ export default function ForgeApp(){
   const [retroDate,setRetroDate]            =useState(null); // ISO YYYY-MM-DD or null
   const [retroToast,setRetroToast]          =useState(null); // { date, sessionName } | null
 
+  // Passkey nudge state. PN.stage(profile) returns "chip" | "card" | "hidden",
+  // recomputed from createdAt + snoozedUntil + current time. We pull it once
+  // per profile activation + once per home-screen render trigger and store
+  // the effective stage here so the UI can subscribe without re-reading LS.
+  // Also tracks the WebAuthn support flag and the registration ceremony state
+  // so the home nudge can register a passkey directly without bouncing through
+  // ProfileScreen — every extra tap leaks conversion.
+  const [pnStage,setPnStage]               =useState("hidden");
+  const [pnWebAuthnSupported,setPnWebAuthnSupported]=useState(false);
+  const [pnHasPasskey,setPnHasPasskey]     =useState(false);
+  const [pnBusy,setPnBusy]                 =useState(false);
+  const [pnError,setPnError]               =useState(null);
+  const [pnSuccessToast,setPnSuccessToast] =useState(false);
+
   // Subscribe to sync status changes
   useEffect(() => {
     return SyncStatus.subscribe(status => setSyncState(status.state));
@@ -373,6 +387,25 @@ export default function ForgeApp(){
     } catch (e) {
       console.error("[forge:phase3-hydrate]", e);
     }
+
+    // Passkey nudge — hydrate stage + WebAuthn capability + current passkey state.
+    // PN.init is idempotent so calling it on every activation is safe; for a
+    // returning user it's a no-op, for a brand-new profile (claimed via
+    // ProfileScreen → first appearance here) it seeds the createdAt timestamp
+    // that drives the chip→card escalation.
+    PN.init(activeProfile);
+    setPnStage(PN.stage(activeProfile));
+    isPlatformAuthenticatorAvailable().then(supported => {
+      setPnWebAuthnSupported(supported);
+      // Capability gate — if the device can't do WebAuthn, hide the nudge
+      // entirely. No point asking for something that can't be delivered.
+      if (!supported) setPnStage("hidden");
+    });
+    hasPasskey(activeProfile).then(has => {
+      setPnHasPasskey(has);
+      // If they already have a passkey, the nudge is moot — hide forever.
+      if (has) setPnStage("hidden");
+    });
 
     return () => disableAutoSync();
   },[activeProfile]);
@@ -1229,11 +1262,50 @@ const sProps={
     setScreen("home");
   };
 
+  // ─── Passkey nudge handlers ────────────────────────────────────────────────
+  // Both chip and card share the same register flow. The button on either
+  // surface calls handleRegisterPasskeyFromHome — which runs the WebAuthn
+  // ceremony and, on success, hides the nudge forever for this profile.
+  // On cancellation/error, we silently snooze for 7 days. The user can
+  // re-attempt by waiting out the snooze or by going to the profile sheet.
+  const handleRegisterPasskeyFromHome = async () => {
+    if (!activeProfile || pnBusy) return;
+    setPnBusy(true);
+    setPnError(null);
+    try {
+      const result = await registerPasskey(activeProfile);
+      if (result?.ok) {
+        setPnHasPasskey(true);
+        setPnStage("hidden");
+        setPnSuccessToast(true);
+        setTimeout(() => setPnSuccessToast(false), 3000);
+      } else if (result === null) {
+        // User cancelled the OS prompt — auto-snooze for 7 days.
+        // No error message; cancellation isn't a failure.
+        PN.snooze(activeProfile);
+        setPnStage("hidden");
+      } else {
+        setPnError("Couldn't register passkey. Try again later.");
+        // Don't auto-snooze on error — let the user retry on their own terms.
+      }
+    } catch (e) {
+      console.error("[forge:passkey-register]", e);
+      setPnError(e.message || "Passkey setup failed");
+    }
+    setPnBusy(false);
+  };
+
+  const handleSnoozeNudge = () => {
+    if (!activeProfile) return;
+    PN.snooze(activeProfile);
+    setPnStage("hidden");
+  };
+
   const weeksOnBlock = weeksSince(programmeBlock.startDate);
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)} deloadOffer={deloadOffer} onAcceptDeload={handleAcceptDeload} onDismissDeload={handleDismissDeload} hasRetroGaps={hasRetroGaps} onOpenRetroPicker={handleOpenRetroPicker} retroToast={retroToast} onDismissRetroToast={()=>setRetroToast(null)}/>}
+      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)} deloadOffer={deloadOffer} onAcceptDeload={handleAcceptDeload} onDismissDeload={handleDismissDeload} hasRetroGaps={hasRetroGaps} onOpenRetroPicker={handleOpenRetroPicker} retroToast={retroToast} onDismissRetroToast={()=>setRetroToast(null)} pnStage={pnStage} pnBusy={pnBusy} pnError={pnError} pnSuccessToast={pnSuccessToast} onPnRegister={handleRegisterPasskeyFromHome} onPnSnooze={handleSnoozeNudge} onPnDismissToast={()=>setPnSuccessToast(false)}/>}
       {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} reason={readinessReason} setReason={setReadinessReason} onStart={handleReadinessStart}/>}
       {screen==="session"     && <ErrorBoundary><SessionScreen {...sProps}/></ErrorBoundary>}
       {screen==="done"        && <ErrorBoundary><DoneScreen session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={()=>{ setShowDeloadComplete(false); reset(); }} deloadCompleted={showDeloadComplete}/></ErrorBoundary>}
@@ -1490,6 +1562,14 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
   const [pendingBw, setPendingBw] = useState(75);
   const [claimedName, setClaimedName] = useState(null);
 
+  // Onboarding passkey step — sits between name claim and BW step.
+  // Only renders if WebAuthn is supported (capability gate). Skipping or
+  // failing the ceremony falls through to the BW step — onboarding never
+  // breaks. The flag is one-shot; once dismissed (accept or skip), we move on.
+  const [showPasskeyStep, setShowPasskeyStep] = useState(false);
+  const [onboardingPasskeyBusy, setOnboardingPasskeyBusy] = useState(false);
+  const [onboardingPasskeyError, setOnboardingPasskeyError] = useState(null);
+
   // Passkey state
   const [webAuthnSupported, setWebAuthnSupported] = useState(false);
   const [showPasskeySetup, setShowPasskeySetup] = useState(false);
@@ -1647,10 +1727,18 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
         setSubmitError("Network hiccup. Try again?");
       }
     } else {
-      // Success! For first-time users (no existing profiles), show BW step
+      // Success! For first-time users (no existing profiles), enter onboarding
+      // sequence: passkey step (if supported) → BW step → home.
+      // We always set claimedName so subsequent steps know which profile to
+      // attach data to. The capability gate keeps unsupported devices on the
+      // direct claim → BW path.
       if (existing.length === 0 && !isLocalProfile) {
         setClaimedName(trimmed);
-        setShowBwStep(true);
+        if (webAuthnSupported) {
+          setShowPasskeyStep(true);
+        } else {
+          setShowBwStep(true);
+        }
       }
     }
   };
@@ -1664,6 +1752,113 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
     return null;
   };
   const pip = availabilityPip();
+
+  // Post-claim passkey step (first-time onboarding only). Sits between name
+  // claim and BW step. Three exit paths all fall through to BW:
+  //   1. User accepts and ceremony succeeds — passkey registered, advance
+  //   2. User accepts but ceremony fails/cancels — log error, advance silently
+  //   3. User taps "Later" — advance, no error
+  // The home-screen chip will surface tomorrow if (1) didn't happen.
+  if (showPasskeyStep) {
+    const advanceToBw = () => {
+      setShowPasskeyStep(false);
+      setShowBwStep(true);
+    };
+
+    const handlePasskeyAccept = async () => {
+      if (!claimedName || onboardingPasskeyBusy) return;
+      setOnboardingPasskeyBusy(true);
+      setOnboardingPasskeyError(null);
+      try {
+        const result = await registerPasskey(claimedName);
+        if (result?.ok) {
+          // Mark this profile as having a passkey in the local cache so the
+          // existing ProfileScreen card respects it on later visits.
+          setProfileHasPasskey(prev => ({ ...prev, [claimedName]: true }));
+          advanceToBw();
+        } else {
+          // Cancellation or non-ok result — surface a soft message and let
+          // them retry or skip. Don't auto-advance, give them control.
+          setOnboardingPasskeyError(result === null ? null : "Setup didn't complete. Try again or skip for now.");
+        }
+      } catch (e) {
+        console.error("[forge:onboarding-passkey]", e);
+        setOnboardingPasskeyError(e.message || "Couldn't set up. Try again or skip.");
+      }
+      setOnboardingPasskeyBusy(false);
+    };
+
+    const handlePasskeyLater = () => {
+      advanceToBw();
+    };
+
+    return (
+      <div style={{
+        background: T.bg0, minHeight: "100vh", maxWidth: 430, margin: "0 auto",
+        fontFamily: T.sans, color: T.text1, WebkitFontSmoothing: "antialiased",
+        padding: "72px 24px 48px", position: "relative", overflow: "hidden",
+        display: "flex", flexDirection: "column",
+      }}>
+        {/* Sage ambient — wellness/security territory */}
+        <div style={{position:"absolute",top:-160,left:"50%",transform:"translateX(-50%)",width:500,height:440,background:`radial-gradient(ellipse,${T.sage}26 0%,transparent 65%)`,pointerEvents:"none"}}/>
+
+        <Fade d={0}>
+          <div style={{
+            fontSize: 11, fontWeight: 500, color: T.sage,
+            letterSpacing: "0.18em", textTransform: "uppercase", marginBottom: 20,
+          }}>
+            Secure across devices
+          </div>
+          <div style={{ fontFamily: T.serif, fontSize: 36, fontWeight: 300, lineHeight: 1.15, marginBottom: 16 }}>
+            Add a <span style={{fontStyle:"italic",color:T.sage}}>passkey</span>?
+          </div>
+        </Fade>
+
+        <Fade d={80}>
+          <p style={{ fontSize: 14, color: T.text2, lineHeight: 1.6, marginBottom: 12 }}>
+            Without one, your data lives only on this device — clearing your browser would lose everything.
+          </p>
+          <p style={{ fontSize: 14, color: T.text2, lineHeight: 1.6, marginBottom: 32 }}>
+            With one, your name is yours across phone, laptop, anywhere. Face ID, Touch ID, or your device PIN.
+          </p>
+        </Fade>
+
+        <Fade d={140}>
+          <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "center", flexDirection:"column", gap: 12, minHeight: 80 }}>
+            {onboardingPasskeyError && (
+              <div style={{padding:"10px 14px",borderRadius:T.r.sm,background:`${T.rose}14`,fontSize:12,color:T.rose,maxWidth:320,textAlign:"center",lineHeight:1.5}}>
+                {onboardingPasskeyError}
+              </div>
+            )}
+          </div>
+        </Fade>
+
+        <Fade d={200}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <button onClick={handlePasskeyAccept} disabled={onboardingPasskeyBusy} style={{
+              width: "100%", padding: "18px 24px",
+              background: T.sage, border: "none", borderRadius: T.r.lg,
+              cursor: onboardingPasskeyBusy ? "default" : "pointer",
+              fontFamily: T.serif, fontSize: 20, fontWeight: 400, color: T.bg0,
+              boxShadow: `0 12px 40px ${T.sage}33`,
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              opacity: onboardingPasskeyBusy ? 0.6 : 1,
+            }}>
+              <span>{onboardingPasskeyBusy ? "Setting up…" : "Add passkey"}</span>
+              {!onboardingPasskeyBusy && <span style={{ fontSize: 18 }}>→</span>}
+            </button>
+            <button onClick={handlePasskeyLater} disabled={onboardingPasskeyBusy} style={{
+              width: "100%", padding: "14px 24px",
+              background: "transparent", border: "none", cursor: onboardingPasskeyBusy ? "default" : "pointer",
+              fontFamily: T.sans, fontSize: 14, fontWeight: 400, color: T.text3,
+            }}>
+              Later
+            </button>
+          </div>
+        </Fade>
+      </div>
+    );
+  }
 
   // Post-claim BW step for first-time users
   if (showBwStep) {
@@ -2052,7 +2247,7 @@ function ProfileScreen({existing,current,onActivate,onCancel,bodyweight=null,bwE
 }
 
 // ─── Home ──────────────────────────────────��──────────────────────────────────
-function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft,showBwCard=false,onOpenBwEdit,onDismissBwCard,deloadOffer=null,onAcceptDeload,onDismissDeload,hasRetroGaps=false,onOpenRetroPicker,retroToast=null,onDismissRetroToast}){
+function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayDone,programmeBlock,weeksOnBlock,onRotate,onPerformance,historyCount=0,recoveryNudge=null,onDismissRecovery,syncState="idle",pendingDraft=null,onResumeDraft,onDiscardDraft,showBwCard=false,onOpenBwEdit,onDismissBwCard,deloadOffer=null,onAcceptDeload,onDismissDeload,hasRetroGaps=false,onOpenRetroPicker,retroToast=null,onDismissRetroToast,pnStage="hidden",pnBusy=false,pnError=null,pnSuccessToast=false,onPnRegister,onPnSnooze,onPnDismissToast}){
   const dow      = new Date().getDay(); // 0=Sun
   const weekMap  = [6,0,1,2,3,4,5];    // JS day → WEEK index (Mon=0 … Sun=6)
   const todayIdx = weekMap[dow];
@@ -2434,6 +2629,83 @@ function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayD
             </button>
           </div>
         </Fade>
+      )}
+
+      {/* Passkey nudge — chip phase (days 0-3). Subtle inline link with a tiny
+          dismiss ✕. Tone: discoverability cue. The chip presumes the user
+          might not know what a passkey is or why it matters — vague-but-curious
+          benefit framing ("across devices") is fine because the card phase is
+          where consequences get spelled out. */}
+      {pnStage === "chip" && (
+        <Fade d={195}>
+          <div style={{margin:"14px 24px 0",display:"flex",justifyContent:"center",alignItems:"center",gap:8}}>
+            <button onClick={onPnRegister} disabled={pnBusy}
+              style={{background:"none",border:"none",padding:"6px 4px",cursor:pnBusy?"default":"pointer",fontFamily:T.sans,fontSize:13,color:T.sage,letterSpacing:"0.01em",opacity:pnBusy?0.6:1}}>
+              {pnBusy
+                ? <span style={{fontStyle:"italic",fontFamily:T.serif}}>Setting up…</span>
+                : <>Secure your name <span style={{fontStyle:"italic",fontFamily:T.serif}}>across devices</span> →</>}
+            </button>
+            {!pnBusy && (
+              <button onClick={onPnSnooze} aria-label="Dismiss for a week"
+                style={{background:"none",border:"none",padding:"4px 6px",cursor:"pointer",fontSize:11,color:T.text4,fontFamily:T.sans}}>✕</button>
+            )}
+          </div>
+          {pnError && (
+            <div style={{margin:"8px 24px 0",padding:"8px 14px",borderRadius:T.r.sm,background:`${T.rose}14`,fontSize:11,color:T.rose,textAlign:"center"}}>
+              {pnError}
+            </div>
+          )}
+        </Fade>
+      )}
+
+      {/* Passkey nudge — card phase (days 4+). Same scope as the chip but the
+          consequence becomes explicit. "Lives only on this device" is the
+          honest framing — calling it "data loss" would be true but
+          melodramatic. The 7-day snooze stays so users who keep dismissing
+          aren't trapped in a loop they can't escape. */}
+      {pnStage === "card" && (
+        <Fade d={200}>
+          <div style={{margin:"20px 24px 0",padding:"18px 20px",background:`${T.sage}0E`,border:`1px solid ${T.sage}40`,borderRadius:T.r.lg}}>
+            <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",gap:10,marginBottom:12}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:11,fontWeight:500,color:T.sage,letterSpacing:"0.12em",textTransform:"uppercase",marginBottom:6}}>
+                  Secure across devices
+                </div>
+                <div style={{fontFamily:T.serif,fontSize:17,fontWeight:300,color:T.text1,lineHeight:1.35,marginBottom:6}}>
+                  Add a passkey
+                </div>
+                <p style={{fontSize:13,color:T.text2,lineHeight:1.55,margin:0}}>
+                  Without one, your data lives only on this device. Face ID, Touch ID, or your device PIN — takes a second.
+                </p>
+              </div>
+              <button onClick={onPnSnooze} aria-label="Dismiss"
+                style={{flexShrink:0,background:"none",border:"none",padding:"4px 8px",cursor:"pointer",fontSize:14,color:T.text3,fontFamily:T.sans}}>✕</button>
+            </div>
+            <button onClick={onPnRegister} disabled={pnBusy}
+              style={{width:"100%",padding:"12px 16px",background:T.sage,border:"none",borderRadius:T.r.md,cursor:pnBusy?"default":"pointer",fontFamily:T.serif,fontSize:14,fontWeight:400,color:T.bg0,opacity:pnBusy?0.6:1}}>
+              {pnBusy ? "Setting up…" : "Set up passkey →"}
+            </button>
+            {pnError && (
+              <div style={{marginTop:10,padding:"8px 12px",borderRadius:T.r.sm,background:`${T.rose}14`,fontSize:11,color:T.rose}}>
+                {pnError}
+              </div>
+            )}
+          </div>
+        </Fade>
+      )}
+
+      {/* Passkey success toast — same pattern as retro toast. Sage, 3s auto-dismiss. */}
+      {pnSuccessToast && (
+        <div style={{position:"fixed",top:"calc(20px + env(safe-area-inset-top))",left:"50%",transform:"translateX(-50%)",zIndex:300,maxWidth:"calc(100% - 48px)",pointerEvents:"auto"}}>
+          <div onClick={onPnDismissToast}
+            style={{background:T.bg2,border:`1px solid ${T.sage}55`,borderRadius:T.r.lg,padding:"12px 18px",boxShadow:`0 12px 40px rgba(0,0,0,0.5), 0 0 24px ${T.sage}20`,cursor:"pointer",animation:`pkToastIn 280ms ${T.ease}`,display:"flex",alignItems:"center",gap:10}}>
+            <style>{`@keyframes pkToastIn{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}`}</style>
+            <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:T.sage,flexShrink:0}}/>
+            <span style={{fontSize:13,color:T.text1}}>
+              Passkey added. <span style={{fontStyle:"italic",fontFamily:T.serif}}>Your name's secure now.</span>
+            </span>
+          </div>
+        </div>
       )}
 
       {/* Retro completion toast — sage, 3s auto-dismiss. Sits at the top of
@@ -3160,8 +3432,8 @@ function RetrospectiveSessionSheet({date, bodyweight, workingWeights, workingRep
             <Fade key={entry.name + idx} d={120 + idx * 30}>
               <div style={{
                 padding:"16px 18px 18px",
-                background: entry.skipped ? T.bg2 : T.bg2,
-                border: `1px solid ${entry.skipped ? T.bg3 : T.bg3}`,
+                background: T.bg2,
+                border: `1px solid ${T.bg3}`,
                 borderRadius: T.r.lg,
                 opacity: entry.skipped ? 0.45 : 1,
                 transition: `opacity 180ms ${T.ease}`,
