@@ -1059,7 +1059,16 @@ const sProps={
   // with a payload describing what the user filled in. This handler is
   // intentionally chunky — it owns the "make this look identical to a live
   // session record so the engine doesn't need a code path for it" job.
-  const handleSubmitRetro = useCallback((payload) => {
+  //
+  // INTENTIONALLY a plain arrow function, NOT useCallback. The function lives
+  // after the SSR mount guard (`if (!mounted) return null`) earlier in this
+  // component, so wrapping it in useCallback creates a hook-ordering violation:
+  // the first render (pre-mount) skips this hook entirely, the second render
+  // calls it. React detects the mismatch and crashes with Error #310 in prod
+  // ("Rendered more hooks than during the previous render"). Plain function
+  // closure preserves identical behaviour with zero perf cost — this handler
+  // fires once per retrospective submission.
+  const handleSubmitRetro = (payload) => {
     if (!activeProfile || !retroDate) return;
     const meta = sessionMetaForDate(retroDate);
     if (!meta || meta.type !== "strength") return;
@@ -1255,7 +1264,7 @@ const sProps={
     } catch (e) {
       console.error("[forge:retro-submit]", e);
     }
-  }, [activeProfile, retroDate, programmeBlock, activeDeload, bodyweight, workingWeights, workingReps]);
+  };
 
   const handleCancelRetro = () => {
     setRetroDate(null);
@@ -2698,8 +2707,7 @@ function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayD
       {pnSuccessToast && (
         <div style={{position:"fixed",top:"calc(20px + env(safe-area-inset-top))",left:"50%",transform:"translateX(-50%)",zIndex:300,maxWidth:"calc(100% - 48px)",pointerEvents:"auto"}}>
           <div onClick={onPnDismissToast}
-            style={{background:T.bg2,border:`1px solid ${T.sage}55`,borderRadius:T.r.lg,padding:"12px 18px",boxShadow:`0 12px 40px rgba(0,0,0,0.5), 0 0 24px ${T.sage}20`,cursor:"pointer",animation:`pkToastIn 280ms ${T.ease}`,display:"flex",alignItems:"center",gap:10}}>
-            <style>{`@keyframes pkToastIn{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}`}</style>
+            style={{background:T.bg2,border:`1px solid ${T.sage}55`,borderRadius:T.r.lg,padding:"12px 18px",boxShadow:`0 12px 40px rgba(0,0,0,0.5), 0 0 24px ${T.sage}20`,cursor:"pointer",animation:`toastIn 280ms ${T.ease}`,display:"flex",alignItems:"center",gap:10}}>
             <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:T.sage,flexShrink:0}}/>
             <span style={{fontSize:13,color:T.text1}}>
               Passkey added. <span style={{fontStyle:"italic",fontFamily:T.serif}}>Your name's secure now.</span>
@@ -2713,8 +2721,7 @@ function HomeScreen({rhythm,profileName,onBegin,onProfile,weekDone={},onMarkDayD
       {retroToast && (
         <div style={{position:"fixed",top:"calc(20px + env(safe-area-inset-top))",left:"50%",transform:"translateX(-50%)",zIndex:300,maxWidth:"calc(100% - 48px)",pointerEvents:"auto"}}>
           <div onClick={onDismissRetroToast}
-            style={{background:T.bg2,border:`1px solid ${T.sage}55`,borderRadius:T.r.lg,padding:"12px 18px",boxShadow:`0 12px 40px rgba(0,0,0,0.5), 0 0 24px ${T.sage}20`,cursor:"pointer",animation:`retroToastIn 280ms ${T.ease}`,display:"flex",alignItems:"center",gap:10}}>
-            <style>{`@keyframes retroToastIn{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:translateY(0)}}`}</style>
+            style={{background:T.bg2,border:`1px solid ${T.sage}55`,borderRadius:T.r.lg,padding:"12px 18px",boxShadow:`0 12px 40px rgba(0,0,0,0.5), 0 0 24px ${T.sage}20`,cursor:"pointer",animation:`toastIn 280ms ${T.ease}`,display:"flex",alignItems:"center",gap:10}}>
             <span style={{display:"inline-block",width:6,height:6,borderRadius:"50%",background:T.sage,flexShrink:0}}/>
             <span style={{fontSize:13,color:T.text1}}>
               Logged <span style={{fontStyle:"italic",fontFamily:T.serif}}>{retroToast.sessionName}</span> for {retroToast.date}
@@ -2863,7 +2870,6 @@ function RpeCard({onPick,label="How was that set?"}){
   ];
   return (
     <div style={{margin:"14px 20px 0",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,padding:"16px 18px",animation:`fadeSlide 240ms ${T.ease}`}}>
-      <style>{`@keyframes fadeSlide{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}`}</style>
       <div style={{fontSize:11,fontWeight:500,color:T.text3,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:12}}>{label}</div>
       <div style={{display:"flex",gap:8}}>
         {opts.map(o=>(
@@ -3026,7 +3032,6 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
       {showVid&&vidEx&&(
         <div onClick={()=>setShowVid(false)} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
           <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:24,width:"100%",maxWidth:430,borderTop:`1px solid ${T.coral}33`,animation:`slideUp 280ms ${T.ease}`}}>
-            <style>{`@keyframes slideUp{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
               <div>
                 <div style={{fontFamily:T.serif,fontSize:22,fontWeight:300,lineHeight:1.1}}>{vidEx.name}</div>
@@ -3227,7 +3232,6 @@ function RetroPickerSheet({history, pendingDraft, onPick, onClose}){
   return (
     <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"24px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.sage}28`,animation:`slideUp 260ms ${T.ease}`}}>
-        <style>{`@keyframes slideUp{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
 
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18}}>
           <div>
@@ -3627,7 +3631,6 @@ function BodyweightEditModal({open,onClose,currentKg,onSave}){
   return (
     <div onClick={onClose} style={{position:"fixed",inset:0,background:"rgba(10,9,8,0.92)",zIndex:400,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:T.bg2,borderRadius:`${T.r.lg}px ${T.r.lg}px 0 0`,padding:"24px 24px calc(32px + env(safe-area-inset-bottom))",width:"100%",maxWidth:430,borderTop:`1px solid ${T.sage}28`,animation:`slideUp 260ms ${T.ease}`}}>
-        <style>{`@keyframes slideUp{from{transform:translateY(60px);opacity:0}to{transform:translateY(0);opacity:1}}`}</style>
 
         {/* Header — tightened to match DrumEditOverlay pattern. ✕ close
             sits top-right rather than a separate Cancel button at the bottom. */}
@@ -3778,7 +3781,6 @@ function IosInstallOverlay({ onDismiss }) {
         display:"flex",alignItems:"flex-end",justifyContent:"center",
         animation:`fadeIn 220ms ${T.ease}`,
       }}>
-      <style>{`@keyframes fadeIn{from{opacity:0}to{opacity:1}}`}</style>
       <div onClick={e => e.stopPropagation()}
         style={{
           background:T.bg2,
