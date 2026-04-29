@@ -3,7 +3,39 @@ html, body { height: 100%; background: #131110; overflow-x: hidden; }
 body { -webkit-tap-highlight-color: transparent; font-family: var(--font-dm-sans), sans-serif; }
 input, button, textarea, select { font: inherit; }
 
+/* ─── Keyframe library ─────────────────────────────────────────────────────
+   Animations consolidated here from inline <style> tags in ForgeApp.jsx.
+   Inline injection works (Chrome/Safari handle duplicates gracefully) but
+   creates redundant <style> elements per render. Centralised here so the
+   browser parses each animation once and components reference by name.
+
+   Naming reflects intent rather than mechanics — slideUp is used by all
+   bottom-sheet modals (BW, Drum, Swap, Video, Picker, Drum cell editor),
+   while fadeSlide is the more subtle in-place transition used by the RPE
+   card. Toast animations are sage in spirit; they enter from above. */
+
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(60px); opacity: 0; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+@keyframes fadeSlide {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Toast slide-in from top — used by retro completion + passkey success */
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(-12px); }
+  to   { opacity: 1; transform: translateY(0); }
 }

@@ -15,8 +15,71 @@ const historyPath  = (name) => `forge/profiles/${encodeURIComponent(normalise(na
 // catches adjacent names (e.g. "analmonk" would hit "analmonkey/meta.json").
 const legacyPrefix = (name) => `forge/profiles/${encodeURIComponent(normalise(name))}/`;
 
+// ─── Input validation ─────────────────────────────────────────────────────
+// Profile name validation is the single highest-leverage guard on this API.
+// Without it: bad actors could POST 10MB profile names, write unicode that
+// breaks blob path semantics, or sneak control chars through encodeURIComponent.
+// With it: rejected cleanly with a 400 before any blob operation runs.
+//
+// Rules:
+//   - 1-32 chars after trimming (32 is the soft limit shown in the UI;
+//     we permit a slight buffer for emoji/multi-byte but cap hard at 64)
+//   - Trimmed length > 0
+//   - No control characters (rejects null bytes, line endings, etc)
+//   - No path separators (defence-in-depth on top of encodeURIComponent)
+//
+// Returns { ok: true, normalised, displayName } on success, { ok: false, reason }
+// otherwise. Caller wraps the reason in a NextResponse.json with 400 status.
+const PROFILE_MAX_LEN = 64;     // hard ceiling — UI suggests 32
+const CONTROL_CHARS_RE = /[\u0000-\u001F\u007F]/;
+const PATH_SEPS_RE     = /[/\\]/;
+
+function validateProfile(rawName) {
+  if (typeof rawName !== "string") {
+    return { ok: false, reason: "Profile must be a string" };
+  }
+  const trimmed = rawName.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, reason: "Profile is empty" };
+  }
+  if (trimmed.length > PROFILE_MAX_LEN) {
+    return { ok: false, reason: `Profile too long (max ${PROFILE_MAX_LEN} chars)` };
+  }
+  if (CONTROL_CHARS_RE.test(trimmed)) {
+    return { ok: false, reason: "Profile contains control characters" };
+  }
+  if (PATH_SEPS_RE.test(trimmed)) {
+    return { ok: false, reason: "Profile contains path separators" };
+  }
+  return { ok: true, normalised: trimmed.toLowerCase(), displayName: trimmed };
+}
+
+// Body size guard — reject > 5MB request bodies before parsing. A typical
+// session record is ~2KB; 500 sessions ≈ 1MB. 5MB gives plenty of headroom
+// while preventing pathological bodies from inflating storage costs.
+const MAX_BODY_BYTES = 5 * 1024 * 1024;
+
+async function safeReadJson(request) {
+  // Check Content-Length when present — many clients send it, including ours.
+  const cl = request.headers.get("content-length");
+  if (cl && Number(cl) > MAX_BODY_BYTES) {
+    return { ok: false, reason: "Body too large", status: 413 };
+  }
+  try {
+    const body = await request.json();
+    return { ok: true, body };
+  } catch (e) {
+    return { ok: false, reason: "Invalid JSON", status: 400 };
+  }
+}
+
 // Read a private blob's JSON body via the SDK's authenticated get().
 // Returns null on not-found / parse error / any other failure.
+//
+// NOTE: errors are intentionally swallowed for resilience — most failures
+// are "blob doesn't exist yet" which is expected, not exceptional. The
+// caller can distinguish this from a parse-error case only by examining
+// the blob list before calling, which the existing GET/PUT do already.
 async function readJson(pathname) {
   try {
     const result = await get(pathname, { access: "private" });
@@ -39,7 +102,13 @@ async function readJson(pathname) {
     }
     const text = new TextDecoder().decode(buffer);
     return JSON.parse(text);
-  } catch {
+  } catch (e) {
+    // Surface in server logs so operators can diagnose corrupt blobs vs
+    // genuine 404s. Stays out of the response body to avoid leaking
+    // internal paths to clients.
+    if (e?.name !== "BlobNotFoundError") {
+      console.error("[forge:readJson]", pathname, e?.message || e);
+    }
     return null;
   }
 }
@@ -54,7 +123,14 @@ export async function GET(request) {
   const { searchParams } = new URL(request.url);
   const profile = searchParams.get("profile");
   const check   = searchParams.get("check") === "1";
-  if (!profile) return NextResponse.json(null, { status: 400 });
+
+  // Profile validation — reject malformed names with 400 before doing any
+  // blob work. Returns null body for compatibility with existing client code
+  // that branches on status code rather than parsing error messages.
+  const v = validateProfile(profile);
+  if (!v.ok) {
+    return NextResponse.json({ error: v.reason }, { status: 400 });
+  }
 
   try {
     const { blobs } = await list({ prefix: legacyPrefix(profile) });
@@ -89,11 +165,19 @@ export async function GET(request) {
 // Body: { profile: string, data: { meta?: object, history?: array } }
 // Profile is case-insensitive. Display name should be passed inside meta.displayName.
 export async function PUT(request) {
-  try {
-    const { profile, data } = await request.json();
-    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
-    if (!data)    return NextResponse.json({ error: "No data"    }, { status: 400 });
+  // Parse the body via the size-guarded reader. Rejects oversize payloads
+  // (>5MB) with 413 before any blob work, and malformed JSON with 400.
+  const parsed = await safeReadJson(request);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.reason }, { status: parsed.status });
+  }
+  const { profile, data } = parsed.body;
 
+  const v = validateProfile(profile);
+  if (!v.ok) return NextResponse.json({ error: v.reason }, { status: 400 });
+  if (!data) return NextResponse.json({ error: "No data" }, { status: 400 });
+
+  try {
     const results = {};
 
     // ── Meta write ──────────────────────────────────────────────
@@ -155,10 +239,25 @@ export async function PUT(request) {
 // Body: { profile: string, displayName: string }
 // Returns 409 if the name is already taken.
 export async function POST(request) {
-  try {
-    const { profile, displayName } = await request.json();
-    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
+  const parsed = await safeReadJson(request);
+  if (!parsed.ok) {
+    return NextResponse.json({ error: parsed.reason }, { status: parsed.status });
+  }
+  const { profile, displayName } = parsed.body;
 
+  const v = validateProfile(profile);
+  if (!v.ok) return NextResponse.json({ error: v.reason }, { status: 400 });
+
+  // displayName is what the user entered (preserves case). If they sent it
+  // separately, validate it too. If not, use the validated profile.
+  let resolvedDisplay = v.displayName;
+  if (displayName !== undefined && displayName !== null) {
+    const dv = validateProfile(displayName);
+    if (!dv.ok) return NextResponse.json({ error: `displayName: ${dv.reason}` }, { status: 400 });
+    resolvedDisplay = dv.displayName;
+  }
+
+  try {
     const { blobs } = await list({ prefix: legacyPrefix(profile) });
     if (blobs.length > 0) {
       return NextResponse.json({ error: "Name taken", exists: true }, { status: 409 });
@@ -167,7 +266,7 @@ export async function POST(request) {
     await put(
       metaPath(profile),
       JSON.stringify({
-        displayName: displayName || profile,
+        displayName: resolvedDisplay,
         claimedAt: new Date().toISOString(),
         weights: {},
         reps: {},
@@ -194,7 +293,9 @@ export async function DELETE(request) {
     const { searchParams } = new URL(request.url);
     const profile = searchParams.get("profile");
     const authToken = searchParams.get("authToken");
-    if (!profile) return NextResponse.json({ error: "No profile" }, { status: 400 });
+
+    const v = validateProfile(profile);
+    if (!v.ok) return NextResponse.json({ error: v.reason }, { status: 400 });
 
     // Check if this profile has passkeys
     const credentialsPrefix = `forge/profiles/${encodeURIComponent(normalise(profile))}/credentials.json`;
