@@ -492,6 +492,27 @@ export default function ForgeApp(){
     setBwIsStale(false);
   }, [activeProfile]);
 
+  // Reusable sync update handler — called when backgroundSync finds newer blob data.
+  // Silently updates React state so the UI reflects the freshest data.
+  const handleSyncUpdate = useCallback(({ meta, history: remoteHistory }) => {
+    if (meta?.weights) setWWState(meta.weights);
+    if (meta?.reps) setWRState(meta.reps);
+    if (meta?.streak?.count) setStreak(meta.streak.count);
+    if (meta?.programmeBlock) setProgrammeBlock(meta.programmeBlock);
+    if (remoteHistory?.length) setHistory(remoteHistory);
+  }, []);
+
+  // Open Performance Lab — triggers background sync first to hydrate from blob
+  // if localStorage is stale (e.g. switching from PWA to Safari on same device).
+  // Navigation happens immediately; sync runs in background and updates state
+  // silently if newer data is found.
+  const handleOpenPerformance = useCallback(() => {
+    setScreen("performance");
+    if (activeProfile) {
+      backgroundSync(activeProfile, { onUpdate: handleSyncUpdate });
+    }
+  }, [activeProfile, handleSyncUpdate]);
+
   const activateProfile = async (name, { claim = false } = {}) => {
     const trimmed = String(name).trim();
     if (!trimmed) return { ok: false, reason: "empty" };
@@ -1314,7 +1335,7 @@ const sProps={
 
   return (
     <div style={{background:T.bg0,minHeight:"100vh",maxWidth:430,margin:"0 auto",fontFamily:T.sans,color:T.text1,WebkitFontSmoothing:"antialiased"}}>
-      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={()=>setScreen("performance")} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)} deloadOffer={deloadOffer} onAcceptDeload={handleAcceptDeload} onDismissDeload={handleDismissDeload} hasRetroGaps={hasRetroGaps} onOpenRetroPicker={handleOpenRetroPicker} retroToast={retroToast} onDismissRetroToast={()=>setRetroToast(null)} pnStage={pnStage} pnBusy={pnBusy} pnError={pnError} pnSuccessToast={pnSuccessToast} onPnRegister={handleRegisterPasskeyFromHome} onPnSnooze={handleSnoozeNudge} onPnDismissToast={()=>setPnSuccessToast(false)}/>}
+      {screen==="home"        && <HomeScreen rhythm={rhythm} profileName={activeProfile} onBegin={beginSession} onProfile={()=>setShowProfiles(true)} weekDone={weekDone} onMarkDayDone={handleMarkDayDone} programmeBlock={programmeBlock} weeksOnBlock={weeksOnBlock} onRotate={handleRotate} onPerformance={handleOpenPerformance} historyCount={history.length} recoveryNudge={recoveryNudge} onDismissRecovery={()=>setRecoveryDismissed(true)} syncState={syncState} pendingDraft={pendingDraft} onResumeDraft={handleResumeDraft} onDiscardDraft={handleDiscardDraft} showBwCard={bwIsStale && !bwCardDismissed} onOpenBwEdit={()=>setBwEditOpen(true)} onDismissBwCard={()=>setBwCardDismissed(true)} deloadOffer={deloadOffer} onAcceptDeload={handleAcceptDeload} onDismissDeload={handleDismissDeload} hasRetroGaps={hasRetroGaps} onOpenRetroPicker={handleOpenRetroPicker} retroToast={retroToast} onDismissRetroToast={()=>setRetroToast(null)} pnStage={pnStage} pnBusy={pnBusy} pnError={pnError} pnSuccessToast={pnSuccessToast} onPnRegister={handleRegisterPasskeyFromHome} onPnSnooze={handleSnoozeNudge} onPnDismissToast={()=>setPnSuccessToast(false)}/>}
       {screen==="readiness"   && <ReadinessScreen readiness={readiness} setReadiness={setReadiness} reason={readinessReason} setReason={setReadinessReason} onStart={handleReadinessStart}/>}
       {screen==="session"     && <ErrorBoundary><SessionScreen {...sProps}/></ErrorBoundary>}
       {screen==="done"        && <ErrorBoundary><DoneScreen session={activeSession} profileName={activeProfile} workingWeights={workingWeights} onHome={()=>{ setShowDeloadComplete(false); reset(); }} deloadCompleted={showDeloadComplete}/></ErrorBoundary>}
@@ -2861,7 +2882,7 @@ function ReadinessScreen({readiness,setReadiness,reason,setReason,onStart}){
   );
 }
 
-// ─── RPE Card ──────────────────────────────────────────────────────────────────
+// ─── RPE Card ─────────────────���────────────────────────────────────────────────
 function RpeCard({onPick,label="How was that set?"}){
   const opts=[
     {id:"easy", icon:"😮‍💨",label:"Easy", sub:"More in the tank",color:T.sage},
