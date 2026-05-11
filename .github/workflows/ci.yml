@@ -6,10 +6,17 @@ on:
   pull_request:
     branches: [main]
 
+# Principle of least privilege — CI only needs to read the repo contents.
+# Explicit permissions block silences Dependabot security alerts and limits
+# blast radius if a workflow step were ever compromised.
+permissions:
+  contents: read
+
 jobs:
   build-test-lint:
     name: Build / Test / Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
