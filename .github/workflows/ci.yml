@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-# Principle of least privilege — CI only needs to read the repo contents.
-# Explicit permissions block silences Dependabot security alerts and limits
-# blast radius if a workflow step were ever compromised.
 permissions:
   contents: read
 
@@ -20,10 +17,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "20"
           cache: "npm"
