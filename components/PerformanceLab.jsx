@@ -288,7 +288,7 @@ function ConsistencyGrid({ grid }) {
   return (
     <div style={{display:"flex", gap:6, alignItems:"flex-start"}}>
       {/* Day labels */}
-      <div style={{display:"flex", flexDirection:"column", gap:GAP, paddingTop:2}}>
+      <div style={{display:"flex", flexDirection:"column", gap:GAP}}>
         {["M","T","W","T","F","S","S"].map((d,i) => (
           <div key={i} style={{height:CELL, display:"flex", alignItems:"center", fontSize:9, color:T.text4, fontWeight:500}}>{d}</div>
         ))}
