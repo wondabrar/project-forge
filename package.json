@@ -1,6 +1,6 @@
 {
   "name": "project-forge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -14,13 +14,13 @@
     "@vercel/analytics": "^2.0.1",
     "@vercel/blob": "^2.3.3",
     "@vercel/speed-insights": "^2.0.0",
-    "next": "15.5.15",
+    "next": "15.5.18",
     "react": "^18",
     "react-dom": "^18"
   },
   "devDependencies": {
     "eslint": "^8.57.1",
-    "eslint-config-next": "15.5.15",
+    "eslint-config-next": "15.5.18",
     "vitest": "^4.1.5"
   },
   "overrides": {
