@@ -17,13 +17,14 @@ import {
   checkProfileExists, claimProfile, blobDelete,
   roundPlate, applyRpe, weeksSince, weekKey,
   newDraftLog, logSet, finaliseDraft, scaleForReadiness, D, TS,
-  inferLoadType, LOAD_TYPES,
+  inferLoadType, LOAD_TYPES, startingWeightForLift,
 } from "@/lib/storage";
 import { T } from "@/lib/tokens";
 import {
   computeNextPrescription,
   updateLiftStateFromSession,
   updateMuscleAnchorFromSession,
+  reconcileLiftStateWithSession,
   // Phase 3
   shouldOfferDeload,
   computeDeloadPrescription,
@@ -73,6 +74,25 @@ function formatAgo(ms) {
 function getLoadType(ex) {
   return ex?.loadType || inferLoadType(ex?.name);
 }
+
+// ─── loadType → caption ──────────────────────────────────────────────────────
+// What does the number the user types represent? Resolves the per-DB vs
+// total-load ambiguity the picker has historically left implicit. Two
+// vocabularies coexist: programme.js entries carry "barbell"/"per_db"/
+// "total"/"machine"/"loaded_bw"/"bodyweight"; storage.js inference can
+// also produce "external"/"loaded_bodyweight"/"assisted_bodyweight" for
+// exercises without an explicit programme.js loadType. We cover both.
+// "bodyweight" intentionally has no caption — the picker hides the weight
+// field entirely for those.
+const WEIGHT_CAPTIONS = {
+  barbell:               "weight on the bar",
+  per_db:                "weight per dumbbell",
+  total:                 "total weight",
+  machine:               "machine stack weight",
+  loaded_bw:             "added weight",
+  loaded_bodyweight:     "added weight",
+  assisted_bodyweight:   "band assistance",
+};
 
 // ─── ScrollDrum ────────────────────────────────────────────────────────────────
 function ScrollDrum({value,onChange,step=1.25,min=0,max=500,integer=false,label="",unit=null}){
@@ -589,7 +609,19 @@ export default function ForgeApp(){
   const resolvedEx  = !isSS ? resolveExFn(block.id, null, block.ex) : null;
   const activeEx    = isSS ? (phase==="A" ? resolvedExA : resolvedExB) : resolvedEx;
 
-  const getW=useCallback((ex)=>ex?(workingWeights[ex.name]??ex.weight):null,[workingWeights]);
+  // Resolution order for prescribed weight:
+  //   1. workingWeights[ex.name]  — engine-driven progression from prior sessions
+  //   2. startingWeightForLift(ex.name, bodyweight) — BW% floor for main lifts
+  //      on first-session cold start (only fires for the 5 mains, and only
+  //      when bodyweight has been captured)
+  //   3. ex.weight — the hardcoded SESSIONS default
+  const getW=useCallback((ex)=>{
+    if (!ex) return null;
+    if (workingWeights[ex.name] !== undefined) return workingWeights[ex.name];
+    const bwSeeded = startingWeightForLift(ex.name, bodyweight);
+    if (bwSeeded !== null) return bwSeeded;
+    return ex.weight;
+  },[workingWeights, bodyweight]);
   const getR=useCallback((ex)=>ex?(workingReps[ex.name]??ex.reps):null,[workingReps]);
 
   const onSwap=useCallback((key, newEx)=>{
@@ -616,6 +648,13 @@ export default function ForgeApp(){
     const swapped  = !!swapPick;
     const fromPool = EXERCISE_POOLS[key] ? key : null;
     const loadType = getLoadType(ex);
+    // Mirror getW's resolution order so the LOGGED weight matches what was
+    // DISPLAYED to the user. Critical for main lifts on first session — the
+    // user sees the BW-seeded weight but if we logged ex.weight (the old
+    // hardcoded default) the engine would reason from a phantom number.
+    const resolvedWeight = workingWeights[ex.name]
+      ?? startingWeightForLift(ex.name, bodyweight)
+      ?? ex.weight;
     logSet(draftLogRef.current, {
       blockId: block.id,
       blockType: block.type,
@@ -625,7 +664,7 @@ export default function ForgeApp(){
       fromPool,
       loadType,
       bodyweight: bodyweight,
-      weight: workingWeights[ex.name] ?? ex.weight,
+      weight: resolvedWeight,
       reps: workingReps[ex.name] ?? ex.reps,
       rpe: rpe || null,
     });
@@ -763,7 +802,14 @@ export default function ForgeApp(){
 
           for (const block of sessionRecord.blocks || []) {
             for (const ex of block.exercises || []) {
-              const liftState = trainingState.lifts?.[ex.name] || null;
+              // Reconcile liftState.currentWeight with what was actually
+              // performed BEFORE computing the prescription. A stale seed
+              // (programme default, or a prior session's adjusted-down weight
+              // that the user has since dialled further) otherwise overrides
+              // the engine's reasoning basis and "HOLD" prescriptions surface
+              // at the old number instead of what the user just lifted.
+              const rawLiftState = trainingState.lifts?.[ex.name] || null;
+              const liftState    = reconcileLiftStateWithSession(rawLiftState, ex);
               const profile = getLiftProfile(ex.name);
               const anchorMuscle = profile.primaryMuscle;
               const muscleAnchor = anchorMuscle
@@ -1209,7 +1255,9 @@ const sProps={
 
         for (const block of sessionRecord.blocks || []) {
           for (const ex of block.exercises || []) {
-            const liftState     = trainingState.lifts?.[ex.name] || null;
+            // Reconcile before reading — see same comment on the live path.
+            const rawLiftState  = trainingState.lifts?.[ex.name] || null;
+            const liftState     = reconcileLiftStateWithSession(rawLiftState, ex);
             const profile       = getLiftProfile(ex.name);
             const anchorMuscle  = profile.primaryMuscle;
             const muscleAnchor  = anchorMuscle
@@ -2941,11 +2989,15 @@ function ReadinessScreen({readiness,setReadiness,reason,setReason,onStart}){
 }
 
 // ─── RPE Card ─────────────────���────────────────────────────────────────────────
+// Per-set effort picker. Three-point scale: easy / normal / cooked.
+// Maps to RIR via rpeToRir in storage.js: easy=3, normal=2, cooked=0.
+// The legacy hard/limit scale is only kept as a read-time alias inside
+// rpeToRir for v1 records — it must NOT appear in any UI.
 function RpeCard({onPick,label="How was that set?"}){
   const opts=[
-    {id:"easy", icon:"😮‍💨",label:"Easy", sub:"More in the tank",color:T.sage},
-    {id:"hard", icon:"😤", label:"Hard", sub:"Close to limit",   color:T.gold},
-    {id:"limit",icon:"🔥", label:"Limit",sub:"Max effort",       color:T.rose},
+    {id:"easy",  icon:"😮‍💨",label:"Easy",  sub:"More in the tank",color:T.sage},
+    {id:"normal",icon:"😤", label:"Normal",sub:"Working effort",   color:T.gold},
+    {id:"cooked",icon:"🔥", label:"Cooked",sub:"Max effort",       color:T.rose},
   ];
   return (
     <div style={{margin:"14px 20px 0",background:T.bg2,border:`1px solid ${T.bg3}`,borderRadius:T.r.lg,padding:"16px 18px",animation:`fadeSlide 240ms ${T.ease}`}}>
@@ -2981,13 +3033,18 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
   // Load type handling for bodyweight movements
   const loadType = getLoadType(activeEx);
   const showWeightPicker = loadType !== "bodyweight";
-  const weightLabel = loadType === "loaded_bodyweight" ? "+ kg"
+  const weightLabel = loadType === "loaded_bodyweight" || loadType === "loaded_bw" ? "+ kg"
                     : loadType === "assisted_bodyweight" ? "− kg"
                     : "kg";
   const loadTypeSubtitle = loadType === "bodyweight" ? "Bodyweight"
-                         : loadType === "loaded_bodyweight" ? "Added load"
+                         : loadType === "loaded_bodyweight" || loadType === "loaded_bw" ? "Added load"
                          : loadType === "assisted_bodyweight" ? "Band assist"
                          : null;
+  // Caption telling the user what the entered weight represents. Resolves
+  // the per-dumbbell-vs-total ambiguity that's been ambiguous in the UI so
+  // far. Drives off the programme.js loadType vocabulary plus the
+  // storage.js loadType vocabulary (both can appear via getLoadType).
+  const weightCaption = WEIGHT_CAPTIONS[loadType] || null;
 
   return (
     <div style={{minHeight:"100vh",position:"relative",overflow:"hidden",paddingBottom:40}}>
@@ -3035,11 +3092,16 @@ function SessionScreen({session,block,blockIdx,totalBlocks,setNum,phase,isSS,act
           )}
         </div>
         {showWeightPicker && currentW!==null&&(
-          <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4,cursor:"pointer",userSelect:"none"}} onClick={()=>{ if(activeEx?.name) setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx),loadType}); }}>
-            <span style={{fontFamily:T.serif,fontSize:80,fontWeight:300,color:T.text1,lineHeight:1,letterSpacing:"-0.02em"}}>{currentW}</span>
-            <span style={{fontFamily:T.serif,fontSize:22,fontWeight:300,color:T.text3,marginBottom:8}}>{weightLabel}</span>
-            <span style={{fontSize:11,color:T.text3,marginBottom:10,marginLeft:4}}>↕</span>
-          </div>
+          <>
+            <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:4,cursor:"pointer",userSelect:"none"}} onClick={()=>{ if(activeEx?.name) setEditTarget({exName:activeEx.name,currentKg:currentW,currentReps:getR(activeEx),loadType}); }}>
+              <span style={{fontFamily:T.serif,fontSize:80,fontWeight:300,color:T.text1,lineHeight:1,letterSpacing:"-0.02em"}}>{currentW}</span>
+              <span style={{fontFamily:T.serif,fontSize:22,fontWeight:300,color:T.text3,marginBottom:8}}>{weightLabel}</span>
+              <span style={{fontSize:11,color:T.text3,marginBottom:10,marginLeft:4}}>↕</span>
+            </div>
+            {weightCaption && (
+              <div style={{fontSize:11,color:T.text4,fontStyle:"italic",fontFamily:T.serif,marginBottom:4}}>{weightCaption}</div>
+            )}
+          </>
         )}
         <div style={{display:"flex",alignItems:"baseline",gap:6,cursor:"pointer",userSelect:"none"}} onClick={()=>{ if(activeEx?.name) setEditTarget({exName:activeEx.name,currentKg:showWeightPicker?currentW:null,currentReps:getR(activeEx),loadType}); }}>
           <span style={{fontFamily:T.serif,fontSize:48,fontWeight:400,color:T.coral,lineHeight:1,fontStyle:"italic"}}>{getR(activeEx)}</span>
@@ -3403,7 +3465,11 @@ function RetrospectiveSessionSheet({date, bodyweight, workingWeights, workingRep
   // first-cell auto-fill only propagates to cells the user hasn't touched.
   const [entries, setEntries] = useState(() => exerciseRows.map(ex => {
     const setCount = ex.sets || 3;
-    const baseWeight = workingWeights[ex.name] ?? ex.weight ?? null;
+    // Same resolution order as the live session's getW: working → BW-seeded → SESSIONS default.
+    const baseWeight = workingWeights[ex.name]
+      ?? startingWeightForLift(ex.name, bodyweight)
+      ?? ex.weight
+      ?? null;
     const baseReps   = workingReps[ex.name] ?? ex.reps ?? null;
     const lt = getLoadType(ex);
     return {
