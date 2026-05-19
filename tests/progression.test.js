@@ -18,6 +18,7 @@ import { describe, it, expect } from "vitest";
 import {
   computeNextPrescription,
   updateLiftStateFromSession,
+  reconcileLiftStateWithSession,
   // Phase 3
   detectDeloadSignals,
   shouldOfferDeload,
@@ -33,6 +34,7 @@ import {
   __test__,
   __test_p3__,
 } from "../lib/progression.js";
+import { startingWeightForLift, roundToHalfPlate } from "../lib/storage.js";
 
 // ─── Test helpers ───────────────────────────────────────────────────────────
 function buildSet({ weight = 100, reps = 5, rir = 2, effectiveLoad = null, volume = null }) {
@@ -678,5 +680,185 @@ describe("Internal helpers (__test__)", () => {
       ],
     });
     expect(__test__.topSetRir(ex)).toBe(1);
+  });
+
+  it("topSetWeight returns actual performed top set, NOT max-blended with stale fallback", () => {
+    // Regression test for the engine bug: previously topSetWeight did
+    //   Math.max(...loads, fallbackWeight)
+    // which let a stale liftState.currentWeight override what the user just
+    // performed. Now actual performed loads always win; fallback is used
+    // only when no loads were performed.
+    const ex = buildExercise({
+      sets: [
+        buildSet({ weight: 80, reps: 5, rir: 1 }),
+        buildSet({ weight: 80, reps: 5, rir: 1 }),
+        buildSet({ weight: 80, reps: 5, rir: 1 }),
+      ],
+    });
+    // stale fallback = 110, actual performed = 80. We expect 80.
+    expect(__test__.topSetWeight(ex, 110)).toBe(80);
+  });
+
+  it("topSetWeight uses fallback only when sets are empty or all-zero", () => {
+    const empty = buildExercise({ sets: [] });
+    expect(__test__.topSetWeight(empty, 100)).toBe(100);
+
+    const allZero = buildExercise({
+      sets: [
+        buildSet({ weight: null, reps: 5, rir: 2, effectiveLoad: 0 }),
+        buildSet({ weight: null, reps: 5, rir: 2, effectiveLoad: 0 }),
+      ],
+    });
+    expect(__test__.topSetWeight(allZero, 75)).toBe(75);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// 9. Engine bug — full path: stale liftState seed + in-session dial-down
+//    must HOLD at the actually-performed weight, not "ADD" off the stale basis.
+// ────────────────────────────────────────────────────────────────────────────
+describe("Engine bug — stale liftState seed reconciliation", () => {
+  it("HOLDs at performed weight when user dials DOWN in-session and grinds it out", () => {
+    // Scenario: user has stale liftState.currentWeight = 110 (from old
+    // hardcoded SESSIONS default before recalibration). They adjust DOWN
+    // in-session to 100kg, perform 100kg × 5 at max effort (rir=0). The
+    // engine MUST recognise that 100kg is the actual basis — not max-blend
+    // with the stale 110 number.
+    const lastSession = buildSession({
+      readiness: "normal",
+      exercises: [buildExercise({
+        name: "Barbell Back Squat",
+        sets: [
+          buildSet({ weight: 100, reps: 5, rir: 0 }), // max effort
+          buildSet({ weight: 100, reps: 5, rir: 0 }),
+          buildSet({ weight: 100, reps: 5, rir: 0 }),
+        ],
+        prescribed: { sets: 3, reps: 5, weight: 100 },
+      })],
+    });
+    const staleLiftState = {
+      currentWeight: 110,                      // stale seed
+      currentRepRange: { reps: 5, sets: 3 },
+      bestE1RM: 117,
+      consecutiveHolds: 0,
+      stallSignal: null,
+      history: [],
+    };
+    // Reconcile (mirrors ForgeApp's finalise pipeline)
+    const reconciled = reconcileLiftStateWithSession(
+      staleLiftState,
+      lastSession.blocks[0].exercises[0],
+    );
+    expect(reconciled.currentWeight).toBe(100); // reconciled to actual
+
+    const result = computeNextPrescription({
+      liftName: "Barbell Back Squat",
+      history: [lastSession],
+      liftState: reconciled,
+      muscleAnchor: null,
+      context: { readiness: "normal", currentWeight: 100 },
+    });
+    // rir=0 grinder → HOLD; weight must be the actually-performed 100, not
+    // the stale 110.
+    expect(result.decision).toBe("HOLD");
+    expect(result.weight).toBe(100);
+  });
+
+  it("HOLDs at performed weight when set RPE is 'hard' (rir=1) and basis was stale", () => {
+    const lastSession = buildSession({
+      readiness: "normal",
+      exercises: [buildExercise({
+        name: "Barbell Back Squat",
+        sets: [
+          buildSet({ weight: 100, reps: 5, rir: 1 }), // hard / close to limit
+          buildSet({ weight: 100, reps: 5, rir: 1 }),
+          buildSet({ weight: 100, reps: 5, rir: 1 }),
+        ],
+        prescribed: { sets: 3, reps: 5, weight: 100 },
+      })],
+    });
+    const staleLiftState = {
+      currentWeight: 110,
+      currentRepRange: { reps: 5, sets: 3 },
+      bestE1RM: 117,
+      consecutiveHolds: 0,
+      stallSignal: null,
+      history: [],
+    };
+    const reconciled = reconcileLiftStateWithSession(
+      staleLiftState,
+      lastSession.blocks[0].exercises[0],
+    );
+    const result = computeNextPrescription({
+      liftName: "Barbell Back Squat",
+      history: [lastSession],
+      liftState: reconciled,
+      muscleAnchor: null,
+      context: { readiness: "normal", currentWeight: 100 },
+    });
+    expect(result.decision).toBe("HOLD");
+    expect(result.weight).toBe(100); // not 110, not 112.5
+  });
+
+  it("reconcileLiftStateWithSession returns input untouched when nothing performed", () => {
+    const liftState = { currentWeight: 100, history: [] };
+    const ex = buildExercise({ sets: [] });
+    expect(reconcileLiftStateWithSession(liftState, ex)).toBe(liftState);
+  });
+
+  it("reconcileLiftStateWithSession handles null liftState", () => {
+    expect(reconcileLiftStateWithSession(null, buildExercise({}))).toBe(null);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// 10. Starting-weight helpers — BW% multipliers for main lifts (Task 5)
+// ────────────────────────────────────────────────────────────────────────────
+describe("startingWeightForLift — BW% seeded starts", () => {
+  it("computes Back Squat at 0.75 × bodyweight, rounded to 2.5kg", () => {
+    expect(startingWeightForLift("Barbell Back Squat", 80)).toBe(60);   // 60.0
+    expect(startingWeightForLift("Barbell Back Squat", 73)).toBe(55);   // 54.75 → 55
+  });
+
+  it("computes Hex Bar Deadlift at 1.0 × bodyweight", () => {
+    expect(startingWeightForLift("Hex Bar Deadlift", 80)).toBe(80);
+  });
+
+  it("computes Barbell Bench Press at 0.65 × bodyweight", () => {
+    expect(startingWeightForLift("Barbell Bench Press", 80)).toBe(52.5); // 52.0 → 52.5
+  });
+
+  it("computes OHP at 0.40 × bodyweight", () => {
+    expect(startingWeightForLift("Barbell Overhead Press", 80)).toBe(32.5); // 32.0 → 32.5
+  });
+
+  it("computes Power Clean at 0.50 × bodyweight", () => {
+    expect(startingWeightForLift("Power Clean", 80)).toBe(40);
+  });
+
+  it("floors at 20kg (empty bar) for very light users", () => {
+    expect(startingWeightForLift("Barbell Bench Press", 25)).toBe(20); // 16.25 → 20
+    expect(startingWeightForLift("Barbell Overhead Press", 40)).toBe(20); // 16 → 20
+  });
+
+  it("returns null when bodyweight is null/undefined", () => {
+    expect(startingWeightForLift("Barbell Back Squat", null)).toBe(null);
+    expect(startingWeightForLift("Barbell Back Squat", undefined)).toBe(null);
+  });
+
+  it("returns null for non-main lifts (caller falls back to SESSIONS default)", () => {
+    expect(startingWeightForLift("DB Curl", 80)).toBe(null);
+    expect(startingWeightForLift("Lateral Raise", 80)).toBe(null);
+    expect(startingWeightForLift("Chest-Supported DB Row", 80)).toBe(null);
+  });
+
+  it("roundToHalfPlate rounds to nearest 2.5kg", () => {
+    expect(roundToHalfPlate(50)).toBe(50);
+    expect(roundToHalfPlate(51)).toBe(50);
+    // 51.25 is exactly halfway → JS Math.round rounds half-up → 52.5
+    expect(roundToHalfPlate(51.25)).toBe(52.5);
+    expect(roundToHalfPlate(52.5)).toBe(52.5);
+    expect(roundToHalfPlate(53.74)).toBe(52.5);
+    expect(roundToHalfPlate(53.76)).toBe(55);
   });
 });
